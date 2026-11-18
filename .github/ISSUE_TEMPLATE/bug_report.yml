@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem with JetSport FT-10C Sync
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please avoid including personal information, Bluetooth identifiers, raw logs, or screenshots that expose private data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem description
+      description: What happened, and what did you expect?
+      placeholder: Describe the issue clearly.
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: App version
+      placeholder: e.g. 0.5.3.27
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model
+      placeholder: Phone model (no serial number)
+    validations:
+      required: false
+  - type: input
+    id: android
+    attributes:
+      label: Android version
+      placeholder: Android version
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized diagnostics (optional)
+      description: Only include logs after removing device identifiers and personal data.
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+    validations:
+      required: false

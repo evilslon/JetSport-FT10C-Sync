@@ -1,0 +1,52 @@
+# Gradle / Android build outputs
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+*.apks
+*.dex
+*.class
+
+# Android Studio / IntelliJ local state
+.idea/
+*.iml
+
+# Signing material and local secrets (never commit)
+*.jks
+*.keystore
+*.key
+*.pem
+*.p12
+*.pfx
+keystore.properties
+signing.properties
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs, dumps, captures, temporary exports
+*.log
+*.tmp
+*.temp
+*.dump
+*.hprof
+*.trace
+*.pcap
+*.pcapng
+
+# Local backup/temporary archives
+*.bak
+*.backup
+*.orig
+*.zip
+
+# Kotlin/Java outputs
+.kotlin/
+
+# Editor swap files
+*.swp
+*.swo
+*~
