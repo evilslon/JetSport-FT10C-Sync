@@ -71,7 +71,8 @@ app/
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). The license text is included in the repository. Before public publication, replace the contributor attribution line in `LICENSE` with the confirmed copyright holder, and verify that all included source files are appropriately licensed.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
 
 ## GitHub project policies
 - [Первый коммит и публикация на GitHub (Windows)](docs/GITHUB_FIRST_COMMIT.md)
