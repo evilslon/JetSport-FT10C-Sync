@@ -37,10 +37,21 @@ The screenshots below are from the running application. The Device screenshot ha
   </tr>
 </table>
 
+
 ## Build environment
 
-Open the project root in Android Studio and allow Gradle sync to complete. The project currently uses:
+### Requirements
 
+- Android Studio
+- JDK 17
+- Android SDK Platform 35
+- Internet connection for the initial Gradle Wrapper download and dependency resolution
+
+The project includes **Gradle Wrapper 9.6.0**. A separate Gradle installation is not required.
+
+The project uses:
+
+- Gradle 9.6.0 (via Gradle Wrapper)
 - Android Gradle Plugin 8.5.2
 - Kotlin Android plugin 1.9.24
 - Java/Kotlin JVM target 17
@@ -48,7 +59,63 @@ Open the project root in Android Studio and allow Gradle sync to complete. The p
 - targetSdk 35
 - minSdk 23
 
-The project archive currently does not include the Gradle Wrapper. Build using an Android Studio installation with a compatible Gradle setup.
+**Important:** Use JDK 17 for Gradle. JDK 25 may cause Kotlin daemon compatibility issues with the current Kotlin plugin version.
+
+### Building on Windows
+
+1. Install Android Studio and JDK 17.
+2. Open the project root in Android Studio.
+3. In Android Studio, set **Gradle JDK** to JDK 17:
+   `Settings > Build, Execution, Deployment > Build Tools > Gradle`.
+4. Make sure Android SDK Platform 35 is installed using SDK Manager.
+5. Open PowerShell in the project root.
+
+Set the environment variables (adjust the JDK path if necessary):
+
+```powershell
+$env:JAVA_HOME = "C:\Path\To\JDK-17"
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+```
+
+Build the debug APK:
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+Run JVM unit tests:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest
+```
+
+The debug APK will be generated at:
+
+```text
+app\build\outputs\apk\debug\app-debug.apk
+```
+
+On the first run, Gradle Wrapper automatically downloads Gradle 9.6.0.
+
+### Building on macOS and Linux
+
+From the project root, run:
+
+```bash
+./gradlew :app:assembleDebug
+```
+
+To run JVM unit tests:
+
+```bash
+./gradlew :app:testDebugUnitTest
+```
+
+Make sure JDK 17 and Android SDK Platform 35 are installed and configured.
+
+**Note:** The `local.properties` file contains a machine-specific Android SDK path. It should remain local and must not be committed to the repository.
+
 
 ## Repository structure
 
