@@ -2,7 +2,6 @@
 
 An Android application for local BLE communication with the JetSport FT-10C smart bracelet. The project was created to restore basic local synchronization without depending on the manufacturer's unavailable server infrastructure.
 
-
 ## Current status
 
 - Stable checkpoint: **v0.5.3.27** (`gatt-subscription-guard`)
@@ -22,6 +21,21 @@ An Android application for local BLE communication with the JetSport FT-10C smar
 - History and measurements stored locally
 
 SpO2 is not currently implemented. The standard BLE Battery Service value is not considered authoritative for this device; the app uses the FT-10C-specific A2 battery notification/request flow.
+
+## Screenshots
+
+The screenshots below are from the running application. The Device screenshot has been privacy-edited to hide the bracelet's Bluetooth address and unrelated nearby devices.
+
+<table>
+  <tr>
+    <td align="center"><strong>Today</strong><br><img src="docs/images/01-today.jpg" width="240" alt="Today dashboard showing steps, battery, distance and calories"></td>
+    <td align="center"><strong>Device</strong><br><img src="docs/images/02-device.jpg" width="240" alt="BLE device screen showing the connected FT-10C bracelet"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>History</strong><br><img src="docs/images/03-history.jpg" width="240" alt="Measurement history with heart-rate and blood-pressure charts"></td>
+    <td align="center"><strong>Settings</strong><br><img src="docs/images/04-settings.jpg" width="240" alt="Settings for time synchronization, appearance and interface language"></td>
+  </tr>
+</table>
 
 ## Build environment
 
@@ -50,7 +64,7 @@ app/
     sync/         time, battery and history synchronization state
     MainActivity.kt
   src/test/       JVM unit tests
- docs/           architecture and protocol notes
+docs/           architecture, protocol notes and screenshots
 ```
 
 ## Documentation
@@ -68,15 +82,13 @@ app/
 - The app does not rely on manufacturer cloud services.
 - This is an independent project and is not affiliated with JetSport or the bracelet manufacturer.
 
-
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
-
 ## GitHub project policies
-- [Первый коммит и публикация на GitHub (Windows)](docs/GITHUB_FIRST_COMMIT.md)
 
+- [First commit and GitHub publication guide (Windows)](docs/GITHUB_FIRST_COMMIT.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 - Bug reports and feature requests use the issue templates in `.github/ISSUE_TEMPLATE/`.
