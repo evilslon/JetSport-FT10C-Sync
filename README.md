@@ -4,7 +4,7 @@ An Android application for local BLE communication with the JetSport FT-10C smar
 
 ## Current status
 
-**Release candidate: v1.0.0**, promoted from the user-tested `0.6.0.26` checkpoint.
+**Release candidate: v1.0.0**.
 
 - Bracelet tested: JetSport FT-10C.
 - Phone tested: Huawei Nova 10 SE, Android 13.
