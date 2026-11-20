@@ -14,8 +14,7 @@ import java.util.UUID
  */
 internal class Ft10cGattWriteEventHandler(
     private val timeWriteCharacteristicUuid: UUID,
-    private val isCommandQueueInitialized: () -> Boolean,
-    private val onWriteCallback: (Int) -> Unit,
+    private val onWriteCallback: (BluetoothGatt, Int) -> Unit,
     private val logger: (String) -> Unit,
     private val addressOf: (BluetoothGatt) -> String?,
     private val isCurrentGatt: (BluetoothGatt) -> Boolean
@@ -31,9 +30,7 @@ internal class Ft10cGattWriteEventHandler(
             logger("GATT callback ignored: write belongs to a stale GATT session")
             return
         }
-        if (isCommandQueueInitialized()) {
-            onWriteCallback(status)
-        }
+        onWriteCallback(gatt, status)
     }
 
     fun onDescriptorWrite(

@@ -14,7 +14,8 @@ import com.jetsport.ft10csync.device.Ft10cDeviceProfile
 
 /**
  * Owns the FT-10C GATT connection lifecycle and notification subscription.
- * Packet interpretation and command scheduling deliberately remain in MainActivity.
+ * Packet interpretation and command policy remain outside this platform client;
+ * serialized writes are coordinated by Ft10cGattCommandChannel.
  */
 class Ft10cGattClient(
     private val context: Context,
@@ -48,7 +49,7 @@ class Ft10cGattClient(
                 listener.onConnectionStateChange(g, status, newState)
                 try {
                     val started = g.discoverServices()
-                    listenerLog("GATT discoverServices() вызван: accepted=$started")
+                    listenerLog("GATT discoverServices() called: accepted=$started")
                 } catch (e: SecurityException) {
                     listenerLog("GATT discoverServices(): SecurityException: ${e.message}")
                 } catch (e: Exception) {
@@ -133,7 +134,7 @@ class Ft10cGattClient(
         }
         return try {
             val localEnabled = g.setCharacteristicNotification(characteristic, true)
-            listenerLog("${profile.notifyCharacteristicUuid}: локальное включение уведомлений=$localEnabled")
+            listenerLog("${profile.notifyCharacteristicUuid}: local notification enablement=$localEnabled")
             if (!localEnabled) return false
             val result = if (Build.VERSION.SDK_INT >= 33) {
                 g.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
@@ -143,13 +144,13 @@ class Ft10cGattClient(
                 @Suppress("DEPRECATION")
                 if (g.writeDescriptor(descriptor)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
             }
-            listenerLog("${profile.notifyCharacteristicUuid}: запрос записи CCCD 0x2902, результат=$result")
+            listenerLog("${profile.notifyCharacteristicUuid}: CCCD 0x2902 write requested, result=$result")
             result == BluetoothGatt.GATT_SUCCESS
         } catch (e: SecurityException) {
-            listenerLog("${profile.notifyCharacteristicUuid}: нет разрешения для подписки: ${e.message}")
+            listenerLog("${profile.notifyCharacteristicUuid}: permission missing for notification subscription: ${e.message}")
             false
         } catch (e: Exception) {
-            listenerLog("${profile.notifyCharacteristicUuid}: ошибка включения уведомлений ${e.javaClass.simpleName}: ${e.message}")
+            listenerLog("${profile.notifyCharacteristicUuid}: failed to enable notifications ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }

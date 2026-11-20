@@ -35,7 +35,8 @@ class DashboardScreenController(
     private val viewModel: DashboardViewModel,
     private val profileProvider: () -> StepProfile,
     private val languageProvider: () -> String,
-    private val logger: (String) -> Unit
+    private val logger: (String) -> Unit,
+    initialBatteryPercent: Int? = null
 ) {
     private val activeDayState = ActiveDayState(activeDayRepository.lastBraceletDayKey) { dayKey ->
         activeDayRepository.lastBraceletDayKey = dayKey
@@ -48,7 +49,7 @@ class DashboardScreenController(
     private var latestHasTodayData: Boolean = false
     private var requestedDayKey: String? = null
     private var measurementState = MeasurementState()
-    private var batteryPercent: Int? = null
+    private var batteryPercent: Int? = initialBatteryPercent?.coerceIn(0, 100)
     private var stepHistoryStatusKey: String? = null
     private var stepHistoryStatusCount: Int = 0
 
@@ -133,7 +134,7 @@ class DashboardScreenController(
             pressureTime = measurements.pressureTime,
             batteryPercent = batteryPercent,
             stepHistoryStatus = when (stepHistoryStatusKey) {
-                "last_hour" -> if (languageProvider() == "ru") "Последний час: $stepHistoryStatusCount шагов" else "Last hour: $stepHistoryStatusCount steps"
+                "last_hour" -> if (languageProvider() == "ru") "Последний час: $stepHistoryStatusCount steps" else "Last hour: $stepHistoryStatusCount steps"
                 "receiving" -> if (languageProvider() == "ru") "Получено записей: $stepHistoryStatusCount (ожидание завершения)" else "Received records: $stepHistoryStatusCount (waiting for completion)"
                 "synced" -> if (languageProvider() == "ru") "История синхронизирована: $stepHistoryStatusCount записей" else "History synchronized: $stepHistoryStatusCount records"
                 else -> null

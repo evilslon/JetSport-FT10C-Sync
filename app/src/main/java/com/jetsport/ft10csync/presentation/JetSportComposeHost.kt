@@ -45,6 +45,7 @@ import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Card
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -53,6 +54,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.Switch
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -65,6 +67,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.text.style.TextOverflow
 import java.util.Locale
 
@@ -87,14 +90,24 @@ fun JetSportComposeHost(
     onDeviceDisconnect: () -> Unit,
     onDeviceSelected: (String) -> Unit,
     onSettingsSyncModeChanged: (Boolean) -> Unit,
+    onSettingsTimeSyncIntervalChanged: (Int) -> Unit,
     onSettingsChooseDateTime: () -> Unit,
     onSettingsSyncTime: () -> Unit,
+    phoneFinderSoundEnabled: Boolean,
+    onPhoneFinderSoundChanged: (Boolean) -> Unit,
+    phoneFinderVibrationEnabled: Boolean,
+    onPhoneFinderVibrationChanged: (Boolean) -> Unit,
+    phoneFinderAlertActive: Boolean,
+    onStopPhoneFinder: () -> Unit,
+    phoneFinderRingtoneLabel: String,
+    onChoosePhoneFinderRingtone: () -> Unit,
     onSettingsExportLog: () -> Unit,
     onSettingsLogVisibilityChanged: (Boolean) -> Unit,
     onSettingsLanguageChanged: (String) -> Unit,
     darkTheme: Boolean,
     onDarkThemeChanged: (Boolean) -> Unit,
     dateFormat: String,
+    automaticTimeSyncIntervalMinutes: Int,
     onDateFormatChanged: (String) -> Unit,
     connectionWarning: String?,
     onTabSelected: (Int) -> Unit
@@ -114,6 +127,7 @@ fun JetSportComposeHost(
         TabSpec("Settings", Icons.Outlined.Settings)
     )
 
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -168,10 +182,24 @@ fun JetSportComposeHost(
                     1 -> HealthComposeScreen(state = todayState, language = language)
                     2 -> HistoryComposeScreen(state = historyState, language = language, dateFormat = dateFormat, expanded = historyExpanded, onRefresh = onHistoryRefresh, onExpandedChanged = onHistoryExpandedChanged)
                     3 -> DeviceComposeScreen(state = deviceState, language = language, onScan = onDeviceScan, onConnect = onDeviceConnect, onDisconnect = onDeviceDisconnect, onSelect = onDeviceSelected)
-                    4 -> SettingsComposeScreen(state = deviceState, language = language, onProfile = onSettingsProfile, onSyncModeChanged = onSettingsSyncModeChanged, onChooseDateTime = onSettingsChooseDateTime, onSyncTime = onSettingsSyncTime, onExportLog = onSettingsExportLog, onLogVisibilityChanged = onSettingsLogVisibilityChanged, onLanguageChanged = onSettingsLanguageChanged, darkTheme = darkTheme, onDarkThemeChanged = onDarkThemeChanged, dateFormat = dateFormat, onDateFormatChanged = onDateFormatChanged)
+                    4 -> SettingsComposeScreen(state = deviceState, language = language, onProfile = onSettingsProfile, onSyncModeChanged = onSettingsSyncModeChanged, onTimeSyncIntervalChanged = onSettingsTimeSyncIntervalChanged, automaticTimeSyncIntervalMinutes = automaticTimeSyncIntervalMinutes, onChooseDateTime = onSettingsChooseDateTime, onSyncTime = onSettingsSyncTime, phoneFinderSoundEnabled = phoneFinderSoundEnabled, onPhoneFinderSoundChanged = onPhoneFinderSoundChanged, phoneFinderVibrationEnabled = phoneFinderVibrationEnabled, onPhoneFinderVibrationChanged = onPhoneFinderVibrationChanged, phoneFinderRingtoneLabel = phoneFinderRingtoneLabel, onChoosePhoneFinderRingtone = onChoosePhoneFinderRingtone, onExportLog = onSettingsExportLog, onLogVisibilityChanged = onSettingsLogVisibilityChanged, onLanguageChanged = onSettingsLanguageChanged, darkTheme = darkTheme, onDarkThemeChanged = onDarkThemeChanged, dateFormat = dateFormat, onDateFormatChanged = onDateFormatChanged)
                 }
             }
         }
+    }
+    if (phoneFinderAlertActive) {
+        AlertDialog(
+            onDismissRequest = {},
+            properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+            title = { Text(if (language == "ru") "ПОИСК ТЕЛЕФОНА" else "PHONE FINDER") },
+            text = { Text(if (language == "ru") "Браслет ищет телефон. Нажмите кнопку ниже, чтобы остановить звуковой сигнал и вибрацию." else "The bracelet is looking for your phone. Press the button below to stop the sound and vibration.") },
+            confirmButton = {
+                Button(onClick = onStopPhoneFinder, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                    Text(if (language == "ru") "ОСТАНОВИТЬ СИГНАЛ" else "STOP PHONE ALERT")
+                }
+            }
+        )
+    }
     }
 }
 
@@ -218,8 +246,16 @@ private fun SettingsComposeScreen(
     language: String,
     onProfile: () -> Unit,
     onSyncModeChanged: (Boolean) -> Unit,
+    onTimeSyncIntervalChanged: (Int) -> Unit,
+    automaticTimeSyncIntervalMinutes: Int,
     onChooseDateTime: () -> Unit,
     onSyncTime: () -> Unit,
+    phoneFinderSoundEnabled: Boolean,
+    onPhoneFinderSoundChanged: (Boolean) -> Unit,
+    phoneFinderVibrationEnabled: Boolean,
+    onPhoneFinderVibrationChanged: (Boolean) -> Unit,
+    phoneFinderRingtoneLabel: String,
+    onChoosePhoneFinderRingtone: () -> Unit,
     onExportLog: () -> Unit,
     onLogVisibilityChanged: (Boolean) -> Unit,
     onLanguageChanged: (String) -> Unit,
@@ -239,14 +275,55 @@ private fun SettingsComposeScreen(
         if (visibleSyncStatus.isNotBlank()) Text(visibleSyncStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth().height(36.dp).selectable(state.automaticSync, role = Role.RadioButton) { onSyncModeChanged(true) }) {
             CompositionLocalProvider(LocalMinimumInteractiveComponentEnforcement provides false) { RadioButton(selected = state.automaticSync, onClick = { onSyncModeChanged(true) }, modifier = Modifier.size(34.dp)) }
-            Text(if (ru) "Автоматически при подключении" else "Automatically on connection")
+            Text(if (ru) "При подключении и периодически" else "On connection and periodically")
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth().height(36.dp).selectable(!state.automaticSync, role = Role.RadioButton) { onSyncModeChanged(false) }) {
             CompositionLocalProvider(LocalMinimumInteractiveComponentEnforcement provides false) { RadioButton(selected = !state.automaticSync, onClick = { onSyncModeChanged(false) }, modifier = Modifier.size(34.dp)) }
             Text(if (ru) "Вручную" else "Manually")
         }
+        Text(if (ru) "Интервал автоматической синхронизации" else "Automatic synchronization interval", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        listOf(30, 180, 360, 720).forEach { interval ->
+            val label = when (interval) {
+                30 -> if (ru) "30 минут" else "30 minutes"
+                180 -> if (ru) "3 часа (по умолчанию)" else "3 hours (default)"
+                360 -> if (ru) "6 часов" else "6 hours"
+                else -> if (ru) "12 часов" else "12 hours"
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxWidth().height(36.dp).selectable(
+                    selected = automaticTimeSyncIntervalMinutes == interval,
+                    enabled = state.automaticSync,
+                    role = Role.RadioButton
+                ) { onTimeSyncIntervalChanged(interval) }
+            ) {
+                CompositionLocalProvider(LocalMinimumInteractiveComponentEnforcement provides false) {
+                    RadioButton(
+                        selected = automaticTimeSyncIntervalMinutes == interval,
+                        onClick = { onTimeSyncIntervalChanged(interval) },
+                        enabled = state.automaticSync,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
+                Text(label, color = if (state.automaticSync) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+            }
+        }
         OutlinedButton(onClick = onChooseDateTime, enabled = state.canChooseDateTime, modifier = Modifier.fillMaxWidth()) { Text(state.selectedDateTime.ifBlank { if (ru) "ВЫБРАТЬ ДАТУ И ВРЕМЯ" else "CHOOSE DATE AND TIME" }) }
         Button(onClick = onSyncTime, enabled = state.canSyncTime, modifier = Modifier.fillMaxWidth()) { Text(if (ru) "СИНХРОНИЗИРОВАТЬ ВРЕМЯ" else "SYNC TIME") }
+        Divider()
+        Text(if (ru) "ПОИСК ТЕЛЕФОНА" else "PHONE FINDER", style = MaterialTheme.typography.titleMedium)
+        Text(if (ru) "Действия при активации функции «Найти телефон»" else "Actions when “Find phone” is activated", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(if (ru) "Звуковой сигнал" else "Sound alert")
+            Switch(checked = phoneFinderSoundEnabled, onCheckedChange = onPhoneFinderSoundChanged)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(if (ru) "Вибрация" else "Vibration")
+            Switch(checked = phoneFinderVibrationEnabled, onCheckedChange = onPhoneFinderVibrationChanged)
+        }
+        Text(if (ru) "Мелодия: $phoneFinderRingtoneLabel" else "Ringtone: $phoneFinderRingtoneLabel", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedButton(onClick = onChoosePhoneFinderRingtone, modifier = Modifier.fillMaxWidth()) { Text(if (ru) "ВЫБРАТЬ МЕЛОДИЮ" else "CHOOSE RINGTONE") }
         Divider()
         Text(if (ru) "ОФОРМЛЕНИЕ" else "APPEARANCE", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth().height(36.dp).selectable(!darkTheme, role = Role.RadioButton) { onDarkThemeChanged(false) }) {
@@ -271,11 +348,11 @@ private fun SettingsComposeScreen(
         Text(if (ru) "ФОРМАТ ДАТЫ" else "DATE FORMAT", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth().height(36.dp).selectable(dateFormat == "DMY", role = Role.RadioButton) { onDateFormatChanged("DMY") }) {
             CompositionLocalProvider(LocalMinimumInteractiveComponentEnforcement provides false) { RadioButton(selected = dateFormat == "DMY", onClick = { onDateFormatChanged("DMY") }, modifier = Modifier.size(34.dp)) }
-            Text("ДД.ММ.ГГГГ")
+            Text(if (ru) "ДД.ММ.ГГГГ" else "DD.MM.YYYY")
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth().height(36.dp).selectable(dateFormat == "MDY", role = Role.RadioButton) { onDateFormatChanged("MDY") }) {
             CompositionLocalProvider(LocalMinimumInteractiveComponentEnforcement provides false) { RadioButton(selected = dateFormat == "MDY", onClick = { onDateFormatChanged("MDY") }, modifier = Modifier.size(34.dp)) }
-            Text("ММ.ДД.ГГГГ")
+            Text(if (ru) "ММ.ДД.ГГГГ" else "MM.DD.YYYY")
         }
         Divider()
         Text(if (ru) "ДИАГНОСТИКА" else "DIAGNOSTICS", style = MaterialTheme.typography.titleMedium)
@@ -508,7 +585,7 @@ private fun HistoryStepsCard(steps: List<Pair<String, Int>>, ru: Boolean, dateFo
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(if (ru) "Шаги · история по дням" else "Steps · daily history", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            if (steps.isEmpty()) Text(if (ru) "Нет сохранённой истории шагов" else "No saved step history", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (steps.isEmpty()) Text(if (ru) "Нет сохранённой истории steps" else "No saved step history", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             else {
                 val maxSteps = (steps.maxOfOrNull { it.second } ?: 1).coerceAtLeast(1)
                 steps.takeLast(14).forEach { (day, count) ->

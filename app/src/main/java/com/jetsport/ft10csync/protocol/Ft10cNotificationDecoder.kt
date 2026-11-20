@@ -24,6 +24,8 @@ sealed class Ft10cNotificationEvent {
     data class BloodPressure(val systolic: Int, val diastolic: Int) : Ft10cNotificationEvent()
     data class AuxiliaryChannel(val payload: ByteArray) : Ft10cNotificationEvent()
     object MeasurementIntermediate : Ft10cNotificationEvent()
+    /** Reproducible FT-10C Phone Finder notification observed on 0x33F2. */
+    object PhoneFinderActivated : Ft10cNotificationEvent()
 }
 
 object Ft10cNotificationDecoder {
@@ -40,13 +42,24 @@ object Ft10cNotificationDecoder {
 
         val b = payload.map { it.toInt() and 0xFF }
         return when {
-            b[0] == 0xB1 && b.size >= 8 -> Ft10cNotificationEvent.LiveSteps(
-                year = (b[1] shl 8) or b[2],
-                month = b[3],
-                day = b[4],
-                hour = b[5],
-                count = (b[6] shl 8) or b[7]
-            )
+            b.size == 2 && b[0] == 0xD1 && b[1] == 0x0A -> Ft10cNotificationEvent.PhoneFinderActivated
+            b[0] == 0xB1 && b.size >= 8 -> {
+                val year = (b[1] shl 8) or b[2]
+                val month = b[3]
+                val day = b[4]
+                val hour = b[5]
+                if (!isValidDate(year, month, day) || hour !in 0..23) {
+                    null
+                } else {
+                    Ft10cNotificationEvent.LiveSteps(
+                        year = year,
+                        month = month,
+                        day = day,
+                        hour = hour,
+                        count = (b[6] shl 8) or b[7]
+                    )
+                }
+            }
             b[0] == 0xB2 -> Ft10cNotificationEvent.HistoryPacket(payload.copyOf())
             b[0] == 0xA2 && b.size >= 2 -> {
                 val percent = Ft10cBatteryDecoder.decode(payload) ?: return null
@@ -60,5 +73,16 @@ object Ft10cNotificationDecoder {
                 Ft10cNotificationEvent.MeasurementIntermediate
             else -> null
         }
+    }
+
+    /** Keep B1 date/time validation as strict as the B2 history parser. */
+    private fun isValidDate(year: Int, month: Int, day: Int): Boolean {
+        if (year !in 1..9999 || month !in 1..12) return false
+        val daysInMonth = when (month) {
+            2 -> if (year % 400 == 0 || (year % 4 == 0 && year % 100 != 0)) 29 else 28
+            4, 6, 9, 11 -> 30
+            else -> 31
+        }
+        return day in 1..daysInMonth
     }
 }

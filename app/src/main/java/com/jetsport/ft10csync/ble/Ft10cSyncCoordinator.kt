@@ -1,11 +1,12 @@
 package com.jetsport.ft10csync.ble
 
 import android.os.Handler
+import com.jetsport.ft10csync.sync.Ft10cTimeSyncIntervals
 
 /**
- * Coordinates the verified post-connect and foreground synchronization schedule.
+ * Coordinates post-connect, periodic time, and foreground synchronization schedules.
  *
- * This class owns delays and the per-connection automatic-time-sync guard only.
+ * This class owns delays and scheduling only; it does not execute BLE operations.
  * It does not build packets, access GATT characteristics, enqueue commands,
  * decode notifications, or persist measurements. Those operations remain in
  * their existing, independently tested components.
@@ -18,9 +19,11 @@ internal class Ft10cSyncCoordinator(
     private var historyTask: Runnable? = null
     private var batteryTask: Runnable? = null
     private var foregroundTask: Runnable? = null
+    private var periodicTimeTask: Runnable? = null
 
     fun onDisconnected() {
         cancelConnectionWorkflow()
+        cancelPeriodicTimeSync()
         foregroundTask?.let(handler::removeCallbacks)
         foregroundTask = null
     }
@@ -72,6 +75,29 @@ internal class Ft10cSyncCoordinator(
                 onBattery()
             }
         }.also { handler.postDelayed(it, FOREGROUND_REFRESH_DELAY_MS) }
+    }
+
+
+    /** Schedules exactly one next time sync; completion of that write schedules the following one. */
+    fun schedulePeriodicTimeSync(
+        intervalMinutes: Int,
+        isConnected: () -> Boolean,
+        isEnabled: () -> Boolean,
+        onTimeSync: () -> Unit
+    ) {
+        cancelPeriodicTimeSync()
+        if (intervalMinutes !in Ft10cTimeSyncIntervals.SUPPORTED_MINUTES || !isConnected() || !isEnabled()) return
+        val task = Runnable {
+            periodicTimeTask = null
+            if (isConnected() && isEnabled()) onTimeSync()
+        }
+        periodicTimeTask = task
+        handler.postDelayed(task, Ft10cTimeSyncIntervals.delayMillis(intervalMinutes))
+    }
+
+    fun cancelPeriodicTimeSync() {
+        periodicTimeTask?.let(handler::removeCallbacks)
+        periodicTimeTask = null
     }
 
     /** Cancels the one-shot refresh scheduled for the current foreground visit. */

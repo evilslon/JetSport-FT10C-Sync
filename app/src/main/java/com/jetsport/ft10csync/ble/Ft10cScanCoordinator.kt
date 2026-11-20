@@ -76,14 +76,14 @@ class Ft10cScanCoordinator(
         val generation = ++scanGeneration
         val scanCallback = createCallback(generation)
         val timeoutTask = Runnable {
-            if (isCurrentScan(generation)) stop("тайм-аут 20 секунд")
+            if (isCurrentScan(generation)) stop("20-second timeout")
         }
         activeScanner = scanner
         activeCallback = scanCallback
         stopTask = timeoutTask
         isScanning = true
 
-        listener.onLog("Перед startScan: adapterEnabled=${adapter.isEnabled}; scanner=$scanner; API=${Build.VERSION.SDK_INT}")
+        listener.onLog("Before startScan: adapterEnabled=${adapter.isEnabled}; scanner=$scanner; API=${Build.VERSION.SDK_INT}")
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
@@ -95,7 +95,7 @@ class Ft10cScanCoordinator(
         listener.onScanStateChanged(true)
         try {
             scanner.startScan(null, settings, scanCallback)
-            listener.onLog("startScan() вызван успешно; режим LOW_LATENCY, фильтров нет; длительность 20 секунд")
+            listener.onLog("startScan() called successfully; LOW_LATENCY mode, no filters; duration 20 seconds")
             if (isCurrentScan(generation)) handler.postDelayed(timeoutTask, SCAN_DURATION_MS)
         } catch (error: Exception) {
             if (scanGeneration == generation) {
@@ -109,7 +109,7 @@ class Ft10cScanCoordinator(
         }
     }
 
-    fun stop(reason: String = "по запросу") {
+    fun stop(reason: String = "requested") {
         val callback = activeCallback
         val scanner = activeScanner
         val timeout = stopTask
@@ -131,12 +131,12 @@ class Ft10cScanCoordinator(
         try {
             if (scanner != null && callback != null) scanner.stopScan(callback)
             listener.onLog(
-                "Сканирование остановлено ($reason). Всего callback-пакетов: $totalResultCount; " +
-                    "кандидаты известных профилей: $targetResultCount; неизвестные устройства: $otherResultCount; " +
-                    "уникальных устройств: ${discoveredAddresses.size}"
+                "Scan stopped ($reason). Total callback packets: $totalResultCount; " +
+                    "known-profile candidates: $targetResultCount; unknown devices: $otherResultCount; " +
+                    "unique devices: ${discoveredAddresses.size}"
             )
         } catch (e: Exception) {
-            listener.onLog("Ошибка остановки сканирования: ${e.javaClass.simpleName}: ${e.message}")
+            listener.onLog("Failed to stop scan: ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             listener.onScanStateChanged(false)
         }

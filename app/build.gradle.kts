@@ -17,8 +17,8 @@ android {
         applicationId = "com.jetsport.ft10csync"
         minSdk = 23
         targetSdk = 35
-        versionCode = 114
-        versionName = "0.5.3.27-gatt-subscription-guard"
+        versionCode = 138
+        versionName = "1.0.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

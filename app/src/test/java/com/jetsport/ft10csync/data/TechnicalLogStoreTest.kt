@@ -36,4 +36,50 @@ class TechnicalLogStoreTest {
         assertTrue(store.byteCount() <= TechnicalLogStore.DEFAULT_MAX_BYTES)
         assertTrue(store.snapshot().startsWith("record-10\n"))
     }
+    @Test fun restoresPersistedJournalAfterStoreRecreation() {
+        val persistence = InMemoryTechnicalLogPersistence()
+        val firstRun = TechnicalLogStore(maxRecords = 3, maxBytes = 1024, persistence = persistence)
+        firstRun.append("first")
+        firstRun.append("second")
+
+        val secondRun = TechnicalLogStore(maxRecords = 3, maxBytes = 1024, persistence = persistence)
+        assertEquals("first\nsecond\n", secondRun.snapshot())
+        secondRun.append("third")
+
+        val thirdRun = TechnicalLogStore(maxRecords = 3, maxBytes = 1024, persistence = persistence)
+        assertEquals("first\nsecond\nthird\n", thirdRun.snapshot())
+    }
+
+    @Test fun restoredJournalIsTrimmedToCurrentLimitsAndSavedBack() {
+        val persistence = InMemoryTechnicalLogPersistence("one\ntwo\nthree\n")
+        val store = TechnicalLogStore(maxRecords = 2, maxBytes = 1024, persistence = persistence)
+
+        assertEquals("two\nthree\n", store.snapshot())
+        assertEquals("two\nthree\n", persistence.savedSnapshot)
+        assertEquals(2, store.recordCount())
+    }
+
+    @Test fun persistedJournalRespectsUtf8ByteLimit() {
+        val persistence = InMemoryTechnicalLogPersistence()
+        val firstRun = TechnicalLogStore(maxRecords = 10, maxBytes = 7, persistence = persistence)
+        firstRun.append("éé")
+        firstRun.append("abc")
+
+        val secondRun = TechnicalLogStore(maxRecords = 10, maxBytes = 7, persistence = persistence)
+        assertEquals("abc\n", secondRun.snapshot())
+        assertEquals(4, secondRun.byteCount())
+    }
+
+    private class InMemoryTechnicalLogPersistence(initial: String = "") : TechnicalLogPersistence {
+        private var content = initial
+        var savedSnapshot: String = initial
+            private set
+
+        override fun load(): String = content
+        override fun save(snapshot: String) {
+            content = snapshot
+            savedSnapshot = snapshot
+        }
+    }
+
 }

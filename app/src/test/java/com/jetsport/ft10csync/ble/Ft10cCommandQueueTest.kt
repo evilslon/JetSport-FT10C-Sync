@@ -91,4 +91,114 @@ class Ft10cCommandQueueTest {
         assertEquals(1, writeCount)
         assertFalse(queue.isBusy)
     }
+    @Test fun cancelAllDropsActiveAndPendingCommandsAndIgnoresDelayedCallback() {
+        val scheduler = FakeScheduler()
+        val writes = mutableListOf<Byte>()
+        val completed = mutableListOf<String>()
+        val queue = Ft10cCommandQueue(scheduler, { packet ->
+            writes += packet.single()
+            0
+        }, {}, 5_000L)
+
+        queue.enqueue("active", byteArrayOf(1), onCompleted = { _, _ -> completed += "active" })
+        queue.enqueue("pending", byteArrayOf(2), onCompleted = { _, _ -> completed += "pending" })
+        queue.cancelAll("disconnect")
+
+        assertEquals(listOf(1.toByte()), writes)
+        assertTrue(completed.isEmpty())
+        assertFalse(queue.isBusy)
+        assertEquals(0, scheduler.pendingCount())
+
+        // A callback arriving after cancellation must not complete a command
+        // that was already discarded.
+        queue.onWriteCallback(0)
+        assertTrue(completed.isEmpty())
+        assertFalse(queue.isBusy)
+    }
+
+    @Test fun callbackAfterCancellationDoesNotPreventNewCommandFromStarting() {
+        val scheduler = FakeScheduler()
+        val writes = mutableListOf<Byte>()
+        val queue = Ft10cCommandQueue(scheduler, { packet ->
+            writes += packet.single()
+            0
+        }, {})
+
+        queue.enqueue("cancelled", byteArrayOf(1))
+        queue.cancelAll("disconnect")
+        queue.onWriteCallback(0) // delayed callback while no command is active
+        queue.enqueue("new session command", byteArrayOf(2))
+
+        assertEquals(listOf(1.toByte(), 2.toByte()), writes)
+        assertTrue(queue.isBusy)
+        assertEquals(1, scheduler.pendingCount())
+    }
+
+    @Test fun callbackFailureCompletesActiveCommandAndContinuesQueue() {
+        val scheduler = FakeScheduler()
+        val statuses = mutableListOf<Pair<Int, Boolean>>()
+        var writeCount = 0
+        val queue = Ft10cCommandQueue(scheduler, { writeCount++; 0 }, {})
+
+        queue.enqueue("first", byteArrayOf(1), onCompleted = { status, timedOut ->
+            statuses += status to timedOut
+        })
+        queue.enqueue("second", byteArrayOf(2))
+        queue.onWriteCallback(133)
+
+        assertEquals(listOf(133 to false), statuses)
+        assertEquals(2, writeCount)
+        assertTrue(queue.isBusy)
+        assertEquals(1, scheduler.pendingCount())
+    }
+
+    @Test fun resetForNewConnectionClearsActiveAndPendingCommandsAndRearmsQueue() {
+        val scheduler = FakeScheduler()
+        val writes = mutableListOf<Byte>()
+        val queue = Ft10cCommandQueue(scheduler, { packet ->
+            writes += packet.single()
+            0
+        }, {}, 100L)
+
+        queue.enqueue("old active", byteArrayOf(1))
+        queue.enqueue("old pending", byteArrayOf(2))
+        queue.resetForNewConnection()
+
+        assertFalse(queue.isBusy)
+        assertEquals(0, scheduler.pendingCount())
+        queue.enqueue("new session", byteArrayOf(3))
+
+        assertEquals(listOf(1.toByte(), 3.toByte()), writes)
+        assertTrue(queue.isBusy)
+        assertEquals(1, scheduler.pendingCount())
+    }
+
+    @Test fun timeoutDropsPendingCommandsAndRequiresExplicitReconnectReset() {
+        val scheduler = FakeScheduler()
+        val writes = mutableListOf<Byte>()
+        val completion = mutableListOf<Pair<Int, Boolean>>()
+        val queue = Ft10cCommandQueue(scheduler, { packet ->
+            writes += packet.single()
+            0
+        }, {}, 100L)
+
+        queue.enqueue("active", byteArrayOf(1), onCompleted = { status, timedOut ->
+            completion += status to timedOut
+        })
+        queue.enqueue("pending", byteArrayOf(2))
+        scheduler.runNext()
+
+        assertEquals(listOf(1.toByte()), writes)
+        assertEquals(1, completion.size)
+        assertTrue(completion.single().second)
+        assertTrue(queue.isBusy)
+        assertEquals(0, scheduler.pendingCount())
+
+        queue.enqueue("blocked", byteArrayOf(3))
+        assertEquals(listOf(1.toByte()), writes)
+        queue.resetForNewConnection()
+        queue.enqueue("after reconnect", byteArrayOf(4))
+        assertEquals(listOf(1.toByte(), 4.toByte()), writes)
+    }
+
 }

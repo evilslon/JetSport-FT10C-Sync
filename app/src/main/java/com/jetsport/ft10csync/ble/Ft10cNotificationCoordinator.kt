@@ -22,11 +22,27 @@ internal class Ft10cNotificationCoordinator(
     private val measurementRepository: MeasurementRepository,
     private val eventDispatcher: BleUiEventDispatcher,
     private val mainHandler: Handler,
-    private val historyTimeout: Runnable,
-    private val onLiveDay: (String) -> Unit,
-    private val onHistoryCommitted: (Int) -> Unit,
+    private val saveBatteryPercent: (Int) -> Unit,
     private val onLog: (String) -> Unit
 ) {
+    private var historyRequestStartedAtMs: Long = 0L
+    private val historyTimeout = Runnable {
+        historyRequestStartedAtMs = 0L
+        historyCoordinator.onTimeout()?.let { timeout ->
+            onLog("STEP HISTORY: timeout waiting for B2 FD; discarded incomplete session (${timeout.discardedRecordCount} staged records); B2 RX blocked until reconnect because protocol has no request ID; previous saved history retained")
+        }
+    }
+
+    fun onHistoryRequestAccepted() {
+        historyRequestStartedAtMs = System.currentTimeMillis()
+        mainHandler.removeCallbacks(historyTimeout)
+        mainHandler.postDelayed(historyTimeout, Ft10cHistoryCoordinator.DEFAULT_TIMEOUT_MS)
+    }
+
+    fun cancelHistoryTimeout() {
+        mainHandler.removeCallbacks(historyTimeout)
+        historyRequestStartedAtMs = 0L
+    }
     fun handle(uuid: UUID, value: ByteArray) {
         onLog("NOTIFY $uuid: ${value.toHex()}")
         when (val event = Ft10cNotificationDecoder.decode(uuid, value)) {
@@ -36,32 +52,41 @@ internal class Ft10cNotificationCoordinator(
             is Ft10cNotificationEvent.LiveSteps -> {
                 val dayKey = "%04d-%02d-%02d".format(Locale.US, event.year, event.month, event.day)
                 val hourKey = "$dayKey %02d:00".format(Locale.US, event.hour)
-                onLiveDay(dayKey)
+                eventDispatcher.dispatch(BleUiEvent.LiveDayChanged(dayKey))
                 val calendar = java.util.Calendar.getInstance().apply {
                     set(event.year, event.month - 1, event.day, event.hour, 0, 0)
                     set(java.util.Calendar.MILLISECOND, 0)
                 }
-                measurementRepository.upsertLiveStepHour(calendar.timeInMillis, dayKey, event.count)
+                measurementRepository.upsertLiveStepHour(calendar.timeInMillis, dayKey, event.count, System.currentTimeMillis())
                 eventDispatcher.dispatch(BleUiEvent.LiveStepsChanged(event.count))
-                onLog("STEP B1: $hourKey = ${event.count} шагов")
+                onLog("STEP B1: $hourKey = ${event.count} steps")
             }
             is Ft10cNotificationEvent.HistoryPacket -> handleHistoryPacket(event.payload)
             is Ft10cNotificationEvent.Battery -> {
                 val percent = event.percent
+                // The Activity may be absent while the foreground BLE service is alive.
+                // Persist the value so a newly created dashboard can render it immediately.
+                saveBatteryPercent(percent)
                 eventDispatcher.dispatch(BleUiEvent.BatteryReceived(percent))
                 batteryCoordinator.onResponse()
                 onLog("BATTERY A2: byte1=$percent -> $percent%; successful response timestamp saved (raw=${value.toHex()})")
             }
             is Ft10cNotificationEvent.HeartRate -> {
+                measurementRepository.insertMeasurement("HR", event.bpm.toFloat(), 0f, System.currentTimeMillis())
                 eventDispatcher.dispatch(BleUiEvent.HeartRateReceived(event.bpm, nowTime()))
-                onLog("Распознано измерение ЧСС: ${event.bpm} уд/мин")
+                onLog("Heart-rate measurement recognized: ${event.bpm} bpm; saved locally")
             }
             is Ft10cNotificationEvent.BloodPressure -> {
+                measurementRepository.insertMeasurement("BP", event.systolic.toFloat(), event.diastolic.toFloat(), System.currentTimeMillis())
                 eventDispatcher.dispatch(BleUiEvent.BloodPressureReceived(event.systolic, event.diastolic, nowTime()))
-                onLog("Распознано измерение давления: ${event.systolic}/${event.diastolic}")
+                onLog("Blood-pressure measurement recognized: ${event.systolic}/${event.diastolic}; saved locally")
+            }
+            Ft10cNotificationEvent.PhoneFinderActivated -> {
+                onLog("PHONE FINDER: confirmed D1 0A notification received from FT-10C; starting phone alert")
+                eventDispatcher.dispatch(BleUiEvent.PhoneFinderActivated)
             }
             Ft10cNotificationEvent.MeasurementIntermediate ->
-                onLog("Получено управляющее/промежуточное сообщение измерения")
+                onLog("Measurement control/intermediate message received")
             null -> Unit
         }
     }
@@ -77,13 +102,14 @@ internal class Ft10cNotificationCoordinator(
                 eventDispatcher.dispatch(BleUiEvent.HistoryProgress(result.recordCount))
             }
             is Ft10cHistoryCoordinator.PacketResult.Completed -> {
-                mainHandler.removeCallbacks(historyTimeout)
+                val requestStartedAtMs = historyRequestStartedAtMs
+                cancelHistoryTimeout()
                 if (result.valid) {
                     val records = result.records
-                    measurementRepository.commitStepHistory(records) { commit ->
-                        commit.onSuccess {
-                            onLog("STEP HISTORY COMPLETE: ${records.size} records committed; B2 FD trailing=${result.trailingByte?.let { "%02X".format(it) } ?: "none"}")
-                            onHistoryCommitted(records.size)
+                    measurementRepository.commitStepHistory(records, requestStartedAtMs) { commit ->
+                        commit.onSuccess { preservedLiveTotals ->
+                            onLog("STEP HISTORY COMPLETE: ${records.size} records committed; preserved newer B1 totals=$preservedLiveTotals; B2 FD trailing=${result.trailingByte?.let { "%02X".format(it) } ?: "none"}")
+                            eventDispatcher.dispatch(BleUiEvent.HistoryCommitted(records.size))
                         }.onFailure { error ->
                             onLog("STEP HISTORY DATABASE ERROR: ${error.javaClass.simpleName}: ${error.message}; previous saved history retained")
                         }

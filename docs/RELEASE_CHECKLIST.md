@@ -1,56 +1,30 @@
-# Source archive and release checklist
+# v1.0.0 release checklist
 
-This document is a checklist for preparing a source release. It does not imply that a release is ready or that checks have been run.
+## Source and documentation
+- [x] Based on the user-tested `0.6.0.26` feature checkpoint.
+- [x] Includes the corrected `BleUiEventDispatcherTest` synchronization and accurate dispatcher comment.
+- [x] Version name is `1.0.0`; versionCode is `138`.
+- [x] README, changelog, release notes, architecture/protocol notes and English/Russian user guides are included.
+- [x] GitHub instructions refer to the existing `evilslon/JetSport-FT10C-Sync` repository and preserve its history.
+- [ ] Owner confirms the copyright-holder wording in `LICENSE` and third-party attribution.
 
-## Confirm the source checkpoint
+## Local validation (reported by project tester)
+- [x] `:app:assembleDebug` — BUILD SUCCESSFUL.
+- [x] `:app:testDebugUnitTest` — 128 tests passed, 0 failed.
+- [x] Resulting APK installed on Huawei Nova 10 SE / Android 13 and user confirmed that the app works with FT-10C.
+- [ ] Optional: eliminate Kotlin 1.9.24 / JDK 25 daemon incompatibility by ensuring Gradle actually runs on JDK 17. Current build falls back to compilation without the Kotlin daemon and succeeds.
+- [ ] Review existing deprecation and compileSdk/AGP warnings; they do not currently prevent the build.
 
-- [ ] Start from a user-confirmed stable checkpoint.
-- [ ] Verify `versionCode` and `versionName` in `app/build.gradle.kts`.
-- [ ] Confirm that the archive contains the expected project root and app sources.
-- [ ] Confirm that no files from another project/version were mixed in.
+## Existing repository update
+- [ ] Confirm the existing `main` checkout is clean and up to date; preserve `.git` and all history.
+- [ ] Apply the source update archive at the repository root, not into a nested directory.
+- [ ] Review `git status`, `git diff`, and `git diff --check`.
+- [ ] Ensure no `local.properties`, signing keys, private logs, build outputs, APKs or IDE caches are staged.
 
-## Keep in the source archive
-
-- Gradle build scripts and `gradle.properties`
-- Android manifest
-- App Kotlin sources
-- Unit tests
-- Documentation (`README.md`, `docs/`, contributor instructions)
-- `.gitignore`
-
-## Exclude local and generated content
-
-- [ ] `.gradle/`
-- [ ] `.idea/` user-specific state (retain shared IDE config only if intentionally curated)
-- [ ] `local.properties`
-- [ ] `build/` and `app/build/`
-- [ ] APK/AAB outputs
-- [ ] Logs, captures, temporary exports, and device-specific diagnostics unless intentionally included as sanitized research material
-
-## Build reproducibility
-
-The current project archive does not include Gradle Wrapper scripts or wrapper distribution files. For now, open the project with Android Studio and use its compatible Gradle setup. Before adding a wrapper, verify the required Gradle version against Android Gradle Plugin 8.5.2 and test it from a clean checkout.
-
-## Pre-publication checks
-
-- [ ] README accurately reflects the current tested state.
-- [ ] Protocol notes distinguish confirmed observations from unknowns.
-- [x] MIT License selected and included. [ ] Confirm and finalize copyright attribution before public publication.
-- [ ] No personal data, local paths, credentials, or unsanitized logs are included.
-- [ ] ZIP integrity passes (`unzip -t` or equivalent).
-- [ ] File inventory reviewed.
-- [ ] Android Studio build performed from a clean extraction.
-- [ ] Hardware/BLE checklist performed for changes that affect BLE behavior.
-- [ ] Release notes list only actual changes and tests.
-
-## Release notes template
-
-### Version
-
-### Changes
-
-### Compatibility
-
-### Validation
-
-### Known limitations
+## GitHub publication (owner action)
+- [ ] Owner approves public release and license/copyright wording.
+- [ ] Commit reviewed changes on the existing `main` branch.
+- [ ] Create annotated tag `v1.0.0` on the release commit.
+- [ ] Push `main` and `v1.0.0`; preserve existing tags, including `v0.5.3.27`.
+- [ ] Create GitHub Release from `v1.0.0` using `RELEASE_NOTES_1.0.0.md`.
+- [ ] Attach an APK only if the exact release APK is intentionally distributed and its provenance/signing status is clearly stated.

@@ -14,7 +14,7 @@ import java.util.UUID
  * Coordinates application-level GATT session events.
  *
  * It owns callback routing and GATT layout inspection only. BluetoothGatt
- * operations remain in Ft10cGattClient/Ft10cDeviceManager; protocol decoding,
+ * operations remain in Ft10cGattClient/Ft10cBleSessionController; protocol decoding,
  * command queueing and persistence remain in their existing components.
  */
 internal class Ft10cGattSessionEventHandler(
@@ -26,6 +26,7 @@ internal class Ft10cGattSessionEventHandler(
     private val stateName: (Int) -> String,
     private val properties: (Int) -> String,
     private val logger: (String) -> Unit,
+    private val uiEvents: BleUiEventDispatcher,
     private val markUnknown: (String) -> Unit,
     private val markReady: (String, String) -> Unit,
     private val enableNotifications: (BluetoothGatt, BraceletDeviceProfile) -> Boolean,
@@ -50,10 +51,12 @@ internal class Ft10cGattSessionEventHandler(
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
                 clearPendingSubscription(gatt, "connection reset")
+                uiEvents.dispatch(BleUiEvent.GattConnected(addressOf(gatt)))
                 onConnected(gatt)
             }
             BluetoothProfile.STATE_DISCONNECTED -> {
                 clearPendingSubscription(gatt, "disconnected")
+                uiEvents.dispatch(BleUiEvent.GattDisconnected(addressOf(gatt)))
                 onDisconnected(gatt)
             }
         }
@@ -79,6 +82,7 @@ internal class Ft10cGattSessionEventHandler(
         if (matchedProfile == null) {
             markUnknown(addressOf(gatt))
             logger("DEVICE PROFILE: no registered profile matches this GATT layout; no model-specific commands will be sent; closing unsupported GATT connection")
+            uiEvents.dispatch(BleUiEvent.UnsupportedGattDevice(addressOf(gatt)))
             onUnknownProfile(gatt)
             return
         }
@@ -117,6 +121,11 @@ internal class Ft10cGattSessionEventHandler(
             return
         }
         logger("GATT subscription CONFIRMED: ${pending.profile.notifyCharacteristicUuid}; starting connection workflow")
+        uiEvents.dispatch(BleUiEvent.GattProfileReady(
+            modelId = pending.profile.modelId,
+            timeCharacteristicFound = pending.timeCharacteristicFound,
+            timeWriteAvailable = pending.timeWriteAvailable
+        ))
         onMatchedProfile(gatt, pending.profile, pending.timeCharacteristicFound, pending.timeWriteAvailable)
     }
 

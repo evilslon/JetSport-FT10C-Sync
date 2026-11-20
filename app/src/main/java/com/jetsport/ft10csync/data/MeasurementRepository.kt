@@ -32,12 +32,12 @@ class MeasurementRepository(context: Context, private val callbackExecutor: Exec
     fun insertMeasurement(type: String, value1: Float, value2: Float, timestamp: Long, onComplete: (() -> Unit)? = null) =
         enqueue({ database.insert(type, value1, value2, timestamp) }, onComplete)
 
-    fun upsertLiveStepHour(hourStart: Long, dayKey: String, steps: Int, onComplete: (() -> Unit)? = null) =
-        enqueue({ database.upsertStepHour(hourStart, dayKey, steps) }, onComplete)
+    fun upsertLiveStepHour(hourStart: Long, dayKey: String, steps: Int, liveUpdatedAtMs: Long, onComplete: (() -> Unit)? = null) =
+        enqueue({ database.upsertStepHour(hourStart, dayKey, steps, liveUpdatedAtMs) }, onComplete)
 
-    fun commitStepHistory(records: List<Ft10cStepRecord>, onComplete: (Result<Unit>) -> Unit) {
+    fun commitStepHistory(records: List<Ft10cStepRecord>, historyRequestStartedAtMs: Long, onComplete: (Result<Int>) -> Unit) {
         worker.execute {
-            val result = runCatching { database.commitStepHistory(records) }
+            val result = runCatching { database.commitStepHistory(records, historyRequestStartedAtMs) }
             callbackExecutor.execute { onComplete(result) }
         }
     }

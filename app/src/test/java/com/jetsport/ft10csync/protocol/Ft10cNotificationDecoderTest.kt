@@ -23,6 +23,48 @@ class Ft10cNotificationDecoderTest {
         assertEquals(587, event.count)
     }
 
+
+    @Test fun decodesCapturedFullLengthLiveStepsPacketAndIgnoresUnspecifiedTail() {
+        val event = Ft10cNotificationDecoder.decode(
+            notifyUuid,
+            hex("B1 07 EA 0B 14 0B 00 20 00 00 00 00 00 12 12 00 00 20")
+        )
+        assertEquals(Ft10cNotificationEvent.LiveSteps(2026, 11, 20, 11, 32), event)
+    }
+
+    @Test fun rejectsImpossibleLiveStepsDate() {
+        assertNull(Ft10cNotificationDecoder.decode(
+            notifyUuid, hex("B1 07 EA 02 1D 0B 00 20")
+        ))
+    }
+
+    @Test fun acceptsLiveStepsOnLeapDay() {
+        assertEquals(
+            Ft10cNotificationEvent.LiveSteps(2024, 2, 29, 23, 32),
+            Ft10cNotificationDecoder.decode(notifyUuid, hex("B1 07 E8 02 1D 17 00 20"))
+        )
+    }
+
+    @Test fun rejectsOutOfRangeLiveStepsMonthAndHour() {
+        assertNull(Ft10cNotificationDecoder.decode(
+            notifyUuid, hex("B1 07 EA 0D 01 0B 00 20")
+        ))
+        assertNull(Ft10cNotificationDecoder.decode(
+            notifyUuid, hex("B1 07 EA 0B 14 18 00 20")
+        ))
+    }
+
+    @Test fun rejectsLiveStepsYearZeroAndDayZero() {
+        assertNull(Ft10cNotificationDecoder.decode(
+            notifyUuid, hex("B1 00 00 01 01 00 00 20")
+        ))
+        assertNull(Ft10cNotificationDecoder.decode(
+            notifyUuid, hex("B1 07 EA 0B 00 00 00 20")
+        ))
+    }
+
+    private fun hex(value: String) = value.split(" ").map { it.toInt(16).toByte() }.toByteArray()
+
     @Test fun preservesB2PayloadForStatefulHistoryParser() {
         val packet = byteArrayOf(0xB2.toByte(), 0x07, 0xEA.toByte(), 0x0B, 0x0C)
         val event = Ft10cNotificationDecoder.decode(notifyUuid, packet)

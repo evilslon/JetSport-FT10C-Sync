@@ -10,10 +10,16 @@ import androidx.lifecycle.ViewModelProvider
  * AppCore receives only application context and the main-thread Handler, never an Activity.
  */
 internal class AppCoreViewModel(context: Context, mainHandler: Handler) : ViewModel() {
-    val core = AppCore(context.applicationContext, mainHandler)
+    val core = AppCoreRegistry.obtain(context.applicationContext, mainHandler)
+    private var serviceOwnsCore = false
+
+    /** Called once the started BLE service has adopted the application runtime. */
+    fun transferOwnershipToService() {
+        serviceOwnsCore = true
+    }
 
     override fun onCleared() {
-        core.close()
+        if (!serviceOwnsCore) AppCoreRegistry.release(core)
         super.onCleared()
     }
 

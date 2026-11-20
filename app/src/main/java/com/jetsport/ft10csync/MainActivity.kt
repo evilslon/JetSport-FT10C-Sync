@@ -2,17 +2,21 @@ package com.jetsport.ft10csync
 
 import android.Manifest
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.app.Activity
+import android.media.RingtoneManager
+import android.net.Uri
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.Intent
+import android.content.ComponentName
+import android.content.ServiceConnection
+import android.os.IBinder
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -30,25 +34,15 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import com.jetsport.ft10csync.presentation.JetSportComposeHost
 import com.jetsport.ft10csync.presentation.JetSportTheme
+import com.jetsport.ft10csync.data.SettingsRepository
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import java.util.UUID
 import com.jetsport.ft10csync.ble.Ft10cScanCoordinator
 import com.jetsport.ft10csync.ble.BluetoothStateMonitor
 import com.jetsport.ft10csync.ble.BleUiEvent
-import com.jetsport.ft10csync.ble.BleUiEventDispatcher
-import com.jetsport.ft10csync.ble.Ft10cNotificationCoordinator
 import com.jetsport.ft10csync.ble.BleConnectionStateStore
-import com.jetsport.ft10csync.ble.Ft10cDeviceManager
-import com.jetsport.ft10csync.ble.Ft10cConnectionCoordinator
-import com.jetsport.ft10csync.ble.Ft10cGattWriteEventHandler
-import com.jetsport.ft10csync.ble.Ft10cGattSessionEventHandler
-import com.jetsport.ft10csync.device.BraceletDeviceProfile
-import com.jetsport.ft10csync.device.Ft10cDeviceProfile
-import com.jetsport.ft10csync.ble.Ft10cCommandQueue
-import com.jetsport.ft10csync.ble.HandlerFt10cQueueScheduler
 import com.jetsport.ft10csync.presentation.AppAction
 import com.jetsport.ft10csync.presentation.AppActionCoordinator
 import com.jetsport.ft10csync.presentation.DashboardViewModel
@@ -56,8 +50,6 @@ import com.jetsport.ft10csync.presentation.DashboardScreenController
 import com.jetsport.ft10csync.presentation.HistoryViewModel
 import com.jetsport.ft10csync.presentation.ScreenLifecycleCoordinator
 import com.jetsport.ft10csync.presentation.ScreenStateStore
-import com.jetsport.ft10csync.sync.Ft10cHistoryCoordinator
-import com.jetsport.ft10csync.sync.Ft10cTimeSyncState
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
@@ -72,110 +64,68 @@ class MainActivity : ComponentActivity() {
     private var todayComposeState by mutableStateOf<com.jetsport.ft10csync.presentation.TodayScreenState?>(null)
     private var historyComposeState by mutableStateOf(com.jetsport.ft10csync.presentation.HistoryUiState())
     private var deviceComposeState by mutableStateOf(com.jetsport.ft10csync.presentation.DeviceUiState())
-    private val stepHistoryTimeout = Runnable {
-        historyCoordinator.onTimeout()?.let { timeout ->
-            log("STEP HISTORY: timeout waiting for B2 FD; discarded incomplete session (${timeout.discardedRecordCount} staged records); B2 RX blocked until reconnect because protocol has no request ID; previous saved history retained")
-        }
-    }
     private lateinit var screenLifecycle: ScreenLifecycleCoordinator
     private var appLanguage by mutableStateOf("ru")
     private var appDarkTheme by mutableStateOf(false)
     private var appDateFormat by mutableStateOf("DMY")
+    private var phoneFinderAlertActive by mutableStateOf(false)
+    private var phoneFinderSoundEnabled by mutableStateOf(true)
+    private var phoneFinderVibrationEnabled by mutableStateOf(true)
+    private var phoneFinderRingtoneLabel by mutableStateOf("System default")
+    private val phoneFinderRingtonePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val data = result.data
+            val picked: Uri? = getPickedRingtoneUri(data)
+            settingsRepository.phoneFinderRingtoneUri = picked?.toString() ?: "__SILENT__"
+            refreshPhoneFinderRingtoneLabel()
+            log("PHONE FINDER: ringtone selection updated (${phoneFinderRingtoneLabel})")
+        }
+    }
     private lateinit var dashboardViewModel: DashboardViewModel
     private lateinit var dashboardController: DashboardScreenController
     private lateinit var historyViewModel: HistoryViewModel
     private lateinit var appActionCoordinator: AppActionCoordinator
-    private lateinit var bleUiEventDispatcher: BleUiEventDispatcher
-    private lateinit var notificationCoordinator: Ft10cNotificationCoordinator
     private var deviceScanning = false
-    private var pendingWriteKind: String? = null
     // Active bracelet day is domain state, not derived from the phone calendar.
     private var selected: BluetoothDevice? = null
     private var selectedAddress: String? = null
     // Connection lifecycle and GATT session coordination live outside Activity.
-    private val bleConnectionState: BleConnectionStateStore get() = deviceManager.connectionState
+    private val bleConnectionState: BleConnectionStateStore get() = appCore.bleConnectionState
     private val connectedAddress: String? get() = bleConnectionState.connectedAddress
-    // The device manager coordinates the session; Ft10cGattClient owns the platform GATT object.
+    // The BLE service owns AppCore lifetime; this Activity binds to and observes the shared state.
     private val handler = Handler(Looper.getMainLooper())
-    private var deferredHistoryRequest: Runnable? = null
     private lateinit var appCore: AppCore
+    private lateinit var appCoreViewModel: AppCoreViewModel
+    private var bleService: Ft10cBleForegroundService? = null
+    private var serviceBound = false
+    private var pendingConnectDevice: BluetoothDevice? = null
+    private var pendingNotificationConnectDevice: BluetoothDevice? = null
+    private val bleServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val localBinder = binder as? Ft10cBleForegroundService.LocalBinder ?: return
+            val service = localBinder.service()
+            bleService = service
+            service.attachCore(appCore)
+            appCoreViewModel.transferOwnershipToService()
+            log("BLE foreground service took ownership of the runtime")
+            pendingConnectDevice?.also { device ->
+                pendingConnectDevice = null
+                beginGattConnection(device)
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            bleService = null
+            log("BLE foreground service disconnected from Activity")
+        }
+    }
     private val measurementRepository get() = appCore.measurementRepository
     private val settingsRepository get() = appCore.settingsRepository
     private val userProfileRepository get() = appCore.userProfileRepository
     private val activeDayRepository get() = appCore.activeDayRepository
-    private val historyCoordinator get() = appCore.historyCoordinator
     private val timeSyncState get() = appCore.timeSyncState
     private val syncCoordinator get() = appCore.syncCoordinator
-    private val batteryCoordinator get() = appCore.batteryCoordinator
     private val technicalLogStore get() = appCore.technicalLogStore
-    private val connectionCoordinator: Ft10cConnectionCoordinator by lazy {
-        Ft10cConnectionCoordinator(
-            handler = handler,
-            deviceManager = deviceManager,
-            isConnected = { address -> connectedAddress == address },
-            logger = ::log,
-            listener = object : Ft10cConnectionCoordinator.Listener {
-                override fun onBeforeConnect() {
-                    if (commandQueueDelegate.isInitialized()) commandQueue.cancelAll("replacing GATT connection")
-                    // Cancel delayed sync and foreground refresh work tied to the previous session.
-                    syncCoordinator.onDisconnected()
-                    batteryCoordinator.onDisconnected()
-                    pendingWriteKind = null
-                    timeSyncState.markWriteCompleted()
-                    cancelDeferredHistoryRequest()
-                    historyCoordinator.cancelActiveSession()
-                    handler.removeCallbacks(stepHistoryTimeout)
-                    activeDeviceProfile = null
-                    dashboardController.onDisconnected()
-                }
-
-                override fun onConnectTimeout(address: String) {
-                    runOnUiThread {
-                        refreshDeviceRows()
-                        updateDeviceUiState {
-                            copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
-                                syncStatus = "Не удалось установить GATT-соединение: нет ответа устройства за 15 секунд")
-                        }
-                        updateConnectionWarning()
-                    }
-                }
-
-                override fun onServiceDiscoveryTimeout(address: String) {
-                    runOnUiThread {
-                        refreshDeviceRows()
-                        updateDeviceUiState {
-                            copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
-                                syncStatus = "Браслет подключён, но не ответил на запрос списка GATT-сервисов за 15 секунд")
-                        }
-                        updateConnectionWarning()
-                        publishDeviceComposeState()
-                    }
-                }
-
-                override fun onServiceDiscoveryFailed(address: String, status: Int) {
-                    runOnUiThread {
-                        refreshDeviceRows()
-                        updateDeviceUiState {
-                            copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
-                                syncStatus = "Не удалось получить GATT-сервисы браслета (status=$status)")
-                        }
-                        updateConnectionWarning()
-                        publishDeviceComposeState()
-                    }
-                }
-
-                override fun onBeforeDisconnect(reason: String) {
-                    activeDeviceProfile = null
-                    if (commandQueueDelegate.isInitialized()) commandQueue.cancelAll("manual disconnect: $reason")
-                    syncCoordinator.onDisconnected()
-                    batteryCoordinator.onDisconnected()
-                    timeSyncState.onDisconnected()
-                    pendingWriteKind = null
-                }
-            }
-        )
-    }
-
     private val adapter: BluetoothAdapter? by lazy {
         (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
     }
@@ -186,11 +136,10 @@ class MainActivity : ComponentActivity() {
     // The registry currently contains FT-10C only. Other models can be added
     // without changing the common scanner or enabling unverified commands.
     private val deviceProfileRegistry get() = appCore.deviceProfileRegistry
-    private var activeDeviceProfile: BraceletDeviceProfile? = null
 
     private val scanCoordinatorDelegate = lazy {
         Ft10cScanCoordinator(
-            adapter = adapter ?: error("BluetoothAdapter отсутствует"),
+            adapter = adapter ?: error("BluetoothAdapter is unavailable"),
             handler = handler,
             profileRegistry = deviceProfileRegistry,
             listener = object : Ft10cScanCoordinator.Listener {
@@ -214,196 +163,28 @@ class MainActivity : ComponentActivity() {
     }
     private val scanCoordinator: Ft10cScanCoordinator by scanCoordinatorDelegate
 
-    private val deviceManager: Ft10cDeviceManager by lazy {
-        Ft10cDeviceManager(this, object : Ft10cDeviceManager.Listener {
-            override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-                gattSessionEventHandler.onConnectionStateChange(g, status, newState)
-            }
-
-            override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-                gattSessionEventHandler.onServicesDiscovered(g, status)
-                connectionCoordinator.onServicesDiscovered(status)
-            }
-
-            override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-                gattSessionEventHandler.onNotification(g, characteristic, value)
-            }
-
-            override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                gattWriteEventHandler.onCharacteristicWrite(g, characteristic, status)
-            }
-
-            override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-                gattSessionEventHandler.onDescriptorWrite(g, descriptor, status)
-                gattWriteEventHandler.onDescriptorWrite(g, descriptor, status)
-            }
-        }).also { it.setLogSink(::log) }
-    }
-    private val gattSessionEventHandler: Ft10cGattSessionEventHandler by lazy {
-        Ft10cGattSessionEventHandler(
-            profileRegistry = deviceProfileRegistry,
-            timeServiceUuid = FT10C_SERVICE_UUID,
-            timeWriteCharacteristicUuid = FT10C_TIME_WRITE_UUID,
-            addressOf = { gatt -> safeAddress(gatt.device) ?: "<unknown>" },
-            statusName = ::gattStatusName,
-            stateName = ::gattStateName,
-            properties = ::properties,
-            logger = ::log,
-            markUnknown = { address -> deviceManager.markUnknown(address) },
-            markReady = { address, modelId -> deviceManager.markReady(address, modelId) },
-            enableNotifications = { gatt, profile -> deviceManager.enableNotifications(gatt, profile) },
-            onConnected = { g ->
-                connectionCoordinator.onConnected()
-                if (commandQueueDelegate.isInitialized()) commandQueue.resetForNewConnection()
-                historyCoordinator.onConnected()
-                timeSyncState.resetAutomaticSyncAttempt()
-                runOnUiThread { refreshDeviceRows(); updateDeviceUiState { copy(connected = true, canConnect = false) }; updateConnectionWarning(); publishDeviceComposeState() }
-                log("GATT device=${safeAddress(g.device)}: подключено. Запрашиваю список сервисов…")
-            },
-            onDisconnected = { g ->
-                connectionCoordinator.onDisconnected()
-                activeDeviceProfile = null
-                dashboardController.onDisconnected()
-                if (commandQueueDelegate.isInitialized()) commandQueue.cancelAll("GATT disconnected")
-                syncCoordinator.onDisconnected()
-                batteryCoordinator.onDisconnected()
-                timeSyncState.onDisconnected()
-                pendingWriteKind = null
-                cancelDeferredHistoryRequest()
-                handler.removeCallbacks(stepHistoryTimeout)
-                historyCoordinator.onDisconnected()
-                log("GATT device=${safeAddress(g.device)}: соединение закрыто")
-                runOnUiThread {
-                    refreshDeviceRows()
-                    updateConnectionWarning()
-                    updateDeviceUiState { copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false, syncStatus = "Нет подключения к браслету") }
-                    refreshDashboard()
-                    publishDeviceComposeState()
-                }
-            },
-            onUnknownProfile = { g ->
-                activeDeviceProfile = null
-                val address = safeAddress(g.device) ?: "<unknown>"
-                log("GATT: устройство $address не является поддерживаемым JetSport FT-10C; закрываю соединение")
-                // Unknown BLE devices may be inspected in the scan list, but the app
-                // must not keep a GATT link open after profile validation fails.
-                deviceManager.disconnectAndClose()
-                runOnUiThread {
-                    refreshDeviceRows()
-                    updateDeviceUiState { copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
-                        syncStatus = if (appLanguage == "ru") "Это не JetSport FT-10C. Соединение закрыто; команды не отправлялись."
-                        else "This is not a JetSport FT-10C. Connection closed; no commands were sent.") }
-                    updateConnectionWarning()
-                    publishDeviceComposeState()
-                }
-            },
-            onMatchedProfile = { g, profile, timeCharacteristicFound, timeWriteAvailable ->
-                activeDeviceProfile = profile
-                runOnUiThread {
-                    updateDeviceUiState { copy(canSyncTime = timeWriteAvailable,
-                        canChooseDateTime = timeCharacteristicFound && connectedAddress != null && !timeSyncState.automaticMode,
-                        syncStatus = if (timeWriteAvailable) {
-                            if (timeSyncState.automaticMode) "FT-10C подключён. Передача профиля и синхронизация…" else "FT-10C подключён. Выбран ручной режим времени."
-                        } else "Характеристика записи времени не найдена") }
-                    publishDeviceComposeState()
-                    // The coordinator owns timing only; operation implementations stay unchanged.
-                    syncCoordinator.scheduleConnectionWorkflow(
-                        isCurrentConnection = { connectedAddress != null && gatt === g },
-                        automaticTimeSyncEnabled = { timeSyncState.automaticMode && timeWriteAvailable },
-                        automaticTimeSyncAlreadyAttempted = { timeSyncState.isAutomaticSyncAttempted() },
-                        onProfile = { sendUserProfileToBracelet("connect") },
-                        onAutomaticTimeSync = {
-                            log("AUTO TIME SYNC: запуск после передачи профиля")
-                            syncBraceletTime(automatic = true)
-                        },
-                        onHistory = { requestStepHistory("connect", force = true) },
-                        onBattery = { requestBatteryA2(force = true) }
-                    )
-                }
-            },
-            onNotification = { uuid, value -> handleNotification(uuid, value) }
-        )
-    }
-
-    private val gattWriteEventHandler: Ft10cGattWriteEventHandler by lazy {
-        Ft10cGattWriteEventHandler(
-            timeWriteCharacteristicUuid = FT10C_TIME_WRITE_UUID,
-            isCommandQueueInitialized = { commandQueueDelegate.isInitialized() },
-            onWriteCallback = { status -> commandQueue.onWriteCallback(status) },
-            logger = ::log,
-            addressOf = { gatt -> safeAddress(gatt.device) },
-            isCurrentGatt = { callbackGatt -> callbackGatt === gatt }
-        )
-    }
-
-    private val gatt: BluetoothGatt? get() = deviceManager.gatt
-    private val commandQueueDelegate = lazy {
-        Ft10cCommandQueue(
-            scheduler = HandlerFt10cQueueScheduler(handler),
-            writer = ::writeFt10cPacket,
-            logger = ::log
-        )
-    }
-    private val commandQueue: Ft10cCommandQueue by commandQueueDelegate
-
-    private fun writeFt10cPacket(packet: ByteArray): Int {
-        val currentGatt = gatt ?: return BluetoothGatt.GATT_FAILURE
-        val characteristic = currentGatt.getService(FT10C_SERVICE_UUID)
-            ?.getCharacteristic(FT10C_TIME_WRITE_UUID)
-            ?: return BluetoothGatt.GATT_FAILURE
-        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) {
-            return BluetoothGatt.GATT_FAILURE
-        }
-        return if (Build.VERSION.SDK_INT >= 33) {
-            currentGatt.writeCharacteristic(
-                characteristic,
-                packet.copyOf(),
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            characteristic.setValue(packet.copyOf())
-            @Suppress("DEPRECATION")
-            if (currentGatt.writeCharacteristic(characteristic)) BluetoothGatt.GATT_SUCCESS
-            else BluetoothGatt.GATT_FAILURE
-        }
-    }
-
-    private fun onQueuedCommandCompleted(name: String, status: Int, timedOut: Boolean) {
-        if (pendingWriteKind == name) pendingWriteKind = null
-        when (name) {
-            "PROFILE" -> {
-                log("PROFILE A9: ${if (timedOut) "тайм-аут ожидания BLE callback" else "BLE write callback status=$status"}; bracelet-side application is confirmed separately by A9 00")
-            }
-            "TIME" -> {
-                timeSyncState.markWriteCompleted()
-                runOnUiThread {
-                    updateDeviceUiState { copy(canSyncTime = connectedAddress != null,
-                        syncStatus = when {
-                            timedOut -> "Нет callback BLE-записи за 5 секунд. Изменение часов не подтверждено."
-                            status == BluetoothGatt.GATT_SUCCESS -> "BLE-запись времени завершена. Изменение часов браслета отдельно не подтверждено."
-                            else -> "Ошибка BLE-записи времени: status=$status"
-                        }) }
-                    publishDeviceComposeState()
-                }
-            }
-            "BATTERY" -> log(if (timedOut) "BATTERY A2: тайм-аут BLE callback; уведомление A2 всё ещё может прийти" else "BATTERY A2 write callback: status=$status; ждём уведомление A2")
-            "HISTORY" -> log(if (timedOut) "STEP HISTORY: тайм-аут BLE write callback; ожидаем/проверяем ответ B2" else "STEP HISTORY: BLE write callback status=$status")
-        }
-    }
-
-    private fun handleNotification(uuid: UUID, value: ByteArray) {
-        notificationCoordinator.handle(uuid, value)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         val savedDarkTheme = getSharedPreferences("jetsport_settings", Context.MODE_PRIVATE).getBoolean("dark_theme", false)
         setTheme(if (savedDarkTheme) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar)
         super.onCreate(savedInstanceState)
-        appCore = ViewModelProvider(
+        appCoreViewModel = ViewModelProvider(
             this,
             AppCoreViewModel.Factory(applicationContext, handler)
-        )[AppCoreViewModel::class.java].core
+        )[AppCoreViewModel::class.java]
+        appCore = appCoreViewModel.core
+        phoneFinderAlertActive = appCore.phoneFinderAlert.isActive
+        phoneFinderSoundEnabled = settingsRepository.phoneFinderSoundEnabled
+        phoneFinderVibrationEnabled = settingsRepository.phoneFinderVibrationEnabled
+        refreshPhoneFinderRingtoneLabel()
+        // Start as a regular started+bound service while the Activity is visible.
+        // It is promoted to connectedDevice foreground mode immediately before GATT connect.
+        val serviceIntent = Intent(this, Ft10cBleForegroundService::class.java)
+        try {
+            startService(serviceIntent)
+            serviceBound = bindService(serviceIntent, bleServiceConnection, Context.BIND_AUTO_CREATE)
+        } catch (e: Exception) {
+            log("Failed to start BLE service: ${e.javaClass.simpleName}: ${e.message}")
+        }
         dashboardViewModel = ViewModelProvider(this, DashboardViewModel.Factory(measurementRepository))[DashboardViewModel::class.java]
         historyViewModel = ViewModelProvider(this, HistoryViewModel.Factory(measurementRepository))[HistoryViewModel::class.java]
         val screenStateStore = ScreenStateStore(
@@ -420,7 +201,8 @@ class MainActivity : ComponentActivity() {
             viewModel = dashboardViewModel,
             profileProvider = ::stepProfile,
             languageProvider = { appLanguage },
-            logger = ::log
+            logger = ::log,
+            initialBatteryPercent = settingsRepository.lastBatteryPercent
         )
         appActionCoordinator = AppActionCoordinator(object : AppActionCoordinator.Handlers {
             override fun showLanguage() = showLanguageDialog()
@@ -439,43 +221,122 @@ class MainActivity : ComponentActivity() {
             override fun selectDevice(address: String) = this@MainActivity.selectDevice(address)
             override fun setAutomaticTimeSync(enabled: Boolean) = this@MainActivity.setTimeSyncMode(enabled)
         })
-        bleUiEventDispatcher = BleUiEventDispatcher(mainExecutor) { event ->
-            when (event) {
-                is BleUiEvent.LiveStepsChanged -> {
-                    dashboardController.updateStepHistoryStatus("last_hour", event.count)
-                    refreshDashboard()
-                    refreshHistory()
-                }
-                is BleUiEvent.HistoryProgress -> dashboardController.updateStepHistoryStatus("receiving", event.receivedRecords)
-                is BleUiEvent.BatteryReceived -> dashboardController.updateBattery(event.percent)
-                is BleUiEvent.HeartRateReceived -> {
-                    dashboardController.updateHeartRate(event.bpm, event.time)
-                    saveMeasurement("HR", event.bpm.toFloat())
-                }
-                is BleUiEvent.BloodPressureReceived -> {
-                    dashboardController.updateBloodPressure(event.systolic, event.diastolic, event.time)
-                    saveMeasurement("BP", event.systolic.toFloat(), event.diastolic.toFloat())
+        lifecycleScope.launch {
+            appCore.bleUiEvents.events.collect { event ->
+                when (event) {
+                    BleUiEvent.TechnicalLogChanged -> publishDeviceComposeState()
+                    is BleUiEvent.PhoneFinderAlertChanged -> phoneFinderAlertActive = event.active
+                    BleUiEvent.PhoneFinderActivated -> Unit // The foreground BLE service owns alert playback.
+                    BleUiEvent.BlePermissionsRequired -> requestBlePermissions()
+                    is BleUiEvent.TimeSyncStatus -> {
+                        updateDeviceUiState { copy(syncStatus = event.message) }
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.CanSyncTimeChanged -> {
+                        updateDeviceUiState { copy(canSyncTime = event.enabled) }
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.TimeWriteCompleted -> {
+                        updateDeviceUiState {
+                            copy(
+                                canSyncTime = event.connected,
+                                syncStatus = when {
+                                    event.timedOut -> "Нет callback BLE-записи за 5 секунд. Изменение часов не подтверждено."
+                                    event.status == BluetoothGatt.GATT_SUCCESS -> "BLE-запись времени завершена. Изменение часов браслета отдельно не подтверждено."
+                                    else -> "Ошибка BLE-записи времени: status=${event.status}"
+                                }
+                            )
+                        }
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.GattConnected -> {
+                        refreshDeviceRows()
+                        updateDeviceUiState { copy(connected = true, canConnect = false) }
+                        updateConnectionWarning()
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.GattDisconnected -> {
+                        dashboardController.onDisconnected()
+                        refreshDeviceRows()
+                        updateConnectionWarning()
+                        updateDeviceUiState { copy(connected = false, canConnect = selected != null,
+                            canSyncTime = false, canChooseDateTime = false,
+                            syncStatus = "Нет подключения к браслету") }
+                        refreshDashboard()
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.UnsupportedGattDevice -> {
+                        updateDeviceUiState { copy(connected = false, canConnect = selected != null,
+                            canSyncTime = false, canChooseDateTime = false,
+                            syncStatus = if (appLanguage == "ru") "Это не JetSport FT-10C. Соединение закрыто; команды не отправлялись."
+                            else "This is not a JetSport FT-10C. Connection closed; no commands were sent.") }
+                        refreshDeviceRows()
+                        updateConnectionWarning()
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.GattProfileReady -> {
+                        updateDeviceUiState { copy(canSyncTime = event.timeWriteAvailable,
+                            canChooseDateTime = event.timeCharacteristicFound && connectedAddress != null && !timeSyncState.automaticMode,
+                            syncStatus = if (event.timeWriteAvailable) {
+                                if (timeSyncState.automaticMode) "FT-10C подключён. Передача профиля и синхронизация…" else "FT-10C подключён. Выбран ручной режим времени."
+                            } else "Характеристика записи времени не найдена") }
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.GattConnectTimedOut -> {
+                        refreshDeviceRows()
+                        updateDeviceUiState {
+                            copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
+                                syncStatus = "Не удалось установить GATT-соединение: нет ответа устройства за 15 секунд")
+                        }
+                        updateConnectionWarning()
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.GattServiceDiscoveryTimedOut -> {
+                        refreshDeviceRows()
+                        updateDeviceUiState {
+                            copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
+                                syncStatus = "Браслет подключён, но не ответил на запрос списка GATT-сервисов за 15 секунд")
+                        }
+                        updateConnectionWarning()
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.GattServiceDiscoveryFailed -> {
+                        refreshDeviceRows()
+                        updateDeviceUiState {
+                            copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false,
+                                syncStatus = "Не удалось получить GATT-сервисы браслета (status=${event.status})")
+                        }
+                        updateConnectionWarning()
+                        publishDeviceComposeState()
+                    }
+                    is BleUiEvent.LiveDayChanged -> dashboardController.onLivePacket(event.dayKey)
+                    is BleUiEvent.LiveStepsChanged -> {
+                        dashboardController.updateStepHistoryStatus("last_hour", event.count)
+                        refreshDashboard()
+                        refreshHistory()
+                    }
+                    is BleUiEvent.HistoryProgress -> dashboardController.updateStepHistoryStatus("receiving", event.receivedRecords)
+                    is BleUiEvent.HistoryCommitted -> {
+                        refreshDashboard()
+                        refreshHistory()
+                        dashboardController.updateStepHistoryStatus("synced", event.recordCount)
+                    }
+                    is BleUiEvent.BatteryReceived -> dashboardController.updateBattery(event.percent)
+                    is BleUiEvent.HeartRateReceived -> {
+                        dashboardController.updateHeartRate(event.bpm, event.time)
+                        refreshHistory()
+                    }
+                    is BleUiEvent.BloodPressureReceived -> {
+                        dashboardController.updateBloodPressure(event.systolic, event.diastolic, event.time)
+                        refreshHistory()
+                    }
                 }
             }
         }
-        notificationCoordinator = Ft10cNotificationCoordinator(
-            historyCoordinator = historyCoordinator,
-            batteryCoordinator = batteryCoordinator,
-            measurementRepository = measurementRepository,
-            eventDispatcher = bleUiEventDispatcher,
-            mainHandler = handler,
-            historyTimeout = stepHistoryTimeout,
-            onLiveDay = { dayKey -> dashboardController.onLivePacket(dayKey) },
-            onHistoryCommitted = { count ->
-                refreshDashboard()
-                refreshHistory()
-                dashboardController.updateStepHistoryStatus("synced", count)
-            },
-            onLog = ::log
-        )
         appLanguage = settingsRepository.language
         appDarkTheme = settingsRepository.darkTheme
         appDateFormat = settingsRepository.dateFormat
+        refreshPhoneFinderRingtoneLabel()
         buildUi()
         lifecycleScope.launch { dashboardViewModel.state.collect { dashboardController.render(it) } }
         lifecycleScope.launch { historyViewModel.state.collect { state ->
@@ -484,10 +345,10 @@ class MainActivity : ComponentActivity() {
         } }
         refreshDashboard()
         refreshHistory()
-        log("JetSport FT-10C Sync ${BuildConfig.VERSION_NAME} — профиль FT-10C, история шагов, дистанция и калории")
-        log("Подробная реклама журналируется только для FT-10C; остальные устройства остаются в списке без подробных записей.")
+        log("JetSport FT-10C Sync ${BuildConfig.VERSION_NAME} — FT-10C profile, step history, distance and calories")
+        log("Detailed notifications are logged only for FT-10C; other devices remain visible without detailed logging.")
         log("Android API=${Build.VERSION.SDK_INT}; manufacturer=${Build.MANUFACTURER}; model=${Build.MODEL}")
-        log("Режим тестирования синхронизации времени: используется команда из JetSport 1.8.0; результат часов браслета отдельно не подтверждается.")
+        log("Time sync test mode: using the command from JetSport 1.8.0; the actual bracelet clock change is not independently verified.")
     }
 
     private fun buildUi() {
@@ -514,15 +375,25 @@ class MainActivity : ComponentActivity() {
                         onDeviceDisconnect = { appActionCoordinator.dispatch(AppAction.Disconnect) },
                         onDeviceSelected = { appActionCoordinator.dispatch(AppAction.SelectDevice(it)) },
                         onSettingsSyncModeChanged = { appActionCoordinator.dispatch(AppAction.SetAutomaticTimeSync(it)) },
+                        onSettingsTimeSyncIntervalChanged = ::setTimeSyncInterval,
                         onSettingsChooseDateTime = { appActionCoordinator.dispatch(AppAction.ChooseDateTime) },
                         onSettingsSyncTime = { appActionCoordinator.dispatch(AppAction.SyncTime) },
+                        phoneFinderSoundEnabled = phoneFinderSoundEnabled,
+                        onPhoneFinderSoundChanged = { enabled -> phoneFinderSoundEnabled = enabled; settingsRepository.phoneFinderSoundEnabled = enabled; log("PHONE FINDER: sound ${if (enabled) "enabled" else "disabled"}") },
+                        phoneFinderVibrationEnabled = phoneFinderVibrationEnabled,
+                        onPhoneFinderVibrationChanged = { enabled -> phoneFinderVibrationEnabled = enabled; settingsRepository.phoneFinderVibrationEnabled = enabled; log("PHONE FINDER: vibration ${if (enabled) "enabled" else "disabled"}") },
+                        phoneFinderAlertActive = phoneFinderAlertActive,
+                        onStopPhoneFinder = { appCore.phoneFinderAlert.stop() },
+                        phoneFinderRingtoneLabel = phoneFinderRingtoneLabel,
+                        onChoosePhoneFinderRingtone = ::launchPhoneFinderRingtonePicker,
                         onSettingsExportLog = { appActionCoordinator.dispatch(AppAction.ExportLog) },
                         onSettingsLogVisibilityChanged = { visible -> updateDeviceUiState { copy(logVisible = visible) }; publishDeviceComposeState() },
                         onSettingsLanguageChanged = { next ->
                             if (next != appLanguage) {
                                 settingsRepository.language = next
                                 appLanguage = next
-                                log("Язык интерфейса изменён на ${next.uppercase(Locale.ROOT)} без перезапуска BLE-соединения")
+                                refreshPhoneFinderRingtoneLabel()
+                                log("UI language changed to ${next.uppercase(Locale.ROOT)} without restarting BLE connection")
                             }
                         },
                         darkTheme = appDarkTheme,
@@ -530,13 +401,14 @@ class MainActivity : ComponentActivity() {
                             settingsRepository.darkTheme = enabled
                             setTheme(if (enabled) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar)
                             appDarkTheme = enabled
-                            log(if (enabled) "Включена тёмная тема" else "Включена светлая тема")
+                            log(if (enabled) "Dark theme enabled" else "Light theme enabled")
                         },
                         dateFormat = appDateFormat,
+                        automaticTimeSyncIntervalMinutes = settingsRepository.automaticTimeSyncIntervalMinutes,
                         onDateFormatChanged = { format ->
                             settingsRepository.dateFormat = format
                             appDateFormat = format
-                            log("Формат даты изменён на ${if (format == "MDY") "MM.DD.YYYY" else "DD.MM.YYYY"}")
+                            log("Date format changed to ${if (format == "MDY") "MM.DD.YYYY" else "DD.MM.YYYY"}")
                         },
                         connectionWarning = connectionWarningText,
                         onTabSelected = { appActionCoordinator.dispatch(AppAction.SelectTab(it)) }
@@ -550,6 +422,39 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun getPickedRingtoneUri(data: Intent?): Uri? = if (Build.VERSION.SDK_INT >= 33) {
+        data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+    } else {
+        data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+    }
+
+    private fun refreshPhoneFinderRingtoneLabel() {
+        phoneFinderRingtoneLabel = when (val stored = settingsRepository.phoneFinderRingtoneUri) {
+            "__SILENT__" -> if (appLanguage == "ru") "Без звука" else "Silent"
+            null -> if (appLanguage == "ru") "По умолчанию" else "System default"
+            else -> runCatching {
+                RingtoneManager.getRingtone(this, Uri.parse(stored))?.getTitle(this)
+            }.getOrNull()?.takeIf { it.isNotBlank() } ?: if (appLanguage == "ru") "Выбранная мелодия" else "Selected ringtone"
+        }
+    }
+
+    private fun launchPhoneFinderRingtonePicker() {
+        val existing = when (val stored = settingsRepository.phoneFinderRingtoneUri) {
+            "__SILENT__" -> null
+            null -> RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            else -> Uri.parse(stored)
+        }
+        val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+            putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, if (appLanguage == "ru") "Мелодия поиска телефона" else "Phone finder ringtone")
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, existing)
+        }
+        phoneFinderRingtonePicker.launch(intent)
+    }
+
     private fun showLanguageDialog() {
         val choices = arrayOf("Русский", "English")
         android.app.AlertDialog.Builder(this)
@@ -558,16 +463,17 @@ class MainActivity : ComponentActivity() {
                 val next = if (which == 0) "ru" else "en"
                 settingsRepository.language = next
                 appLanguage = next
-                // Keep this Activity and its BluetoothGattCallback alive; only rebuild views.
+                refreshPhoneFinderRingtoneLabel()
+                // The AppCore BLE runtime survives this UI rebuild; only Compose views are recreated.
                 val knownDevices = deviceListStateStore.snapshot()
                 buildUi()
                 refreshDashboard()
                 knownDevices.forEach { row -> showOrUpdateDevice(row.address, row.name, row.rssi) }
                 updateConnectionWarning()
-                updateDeviceUiState { copy(connected = gatt != null && connectedAddress != null,
+                updateDeviceUiState { copy(connected = appCore.bleSessionRuntime.hasGatt && connectedAddress != null,
                     canConnect = selected != null && connectedAddress == null,
                     canSyncTime = connectedAddress != null && !timeSyncState.writePending) }
-                log("Язык интерфейса изменён на ${next.uppercase(Locale.ROOT)} без перезапуска BLE-соединения")
+                log("UI language changed to ${next.uppercase(Locale.ROOT)} without restarting BLE connection")
             }
             .show()
     }
@@ -580,70 +486,12 @@ class MainActivity : ComponentActivity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    private fun saveMeasurement(type: String, first: Float, second: Float = 0f) {
-        measurementRepository.insertMeasurement(type, first, second, System.currentTimeMillis()) {
-            refreshHistory()
-        }
-    }
-
     private fun cancelDeferredHistoryRequest() {
-        deferredHistoryRequest?.let(handler::removeCallbacks)
-        deferredHistoryRequest = null
-        historyCoordinator.resetDeferredRetryBudget()
+        appCore.bleSessionRuntime.cancelHistory()
     }
 
-    private fun requestStepHistory(trigger: String, force: Boolean = false, isDeferredRetry: Boolean = false) {
-        val currentGatt = gatt
-        if (currentGatt == null || connectedAddress == null || !hasBlePermissions()) {
-            log("STEP HISTORY: no active connection; trigger=$trigger")
-            return
-        }
-        if (!isDeferredRetry && deferredHistoryRequest == null) {
-            historyCoordinator.resetDeferredRetryBudget()
-        }
-        val now = System.currentTimeMillis()
-        when (historyCoordinator.requestDecision(now, force)) {
-            Ft10cHistoryCoordinator.RequestDecision.BLOCKED_UNTIL_RECONNECT -> { log("STEP HISTORY: blocked after previous timeout; reconnect FT-10C before retry; trigger=$trigger"); return }
-            Ft10cHistoryCoordinator.RequestDecision.ALREADY_IN_FLIGHT -> { log("STEP HISTORY: already in flight; skip trigger=$trigger"); return }
-            Ft10cHistoryCoordinator.RequestDecision.TOO_SOON -> { log("STEP HISTORY: recently requested; skip trigger=$trigger"); return }
-            Ft10cHistoryCoordinator.RequestDecision.READY -> Unit
-        }
-        if (commandQueue.isBusy || pendingWriteKind != null) {
-            if (deferredHistoryRequest != null) return
-            if (!historyCoordinator.tryScheduleDeferredRetry()) {
-                log("STEP HISTORY: deferred retry budget exhausted; waiting for the next trigger")
-                return
-            }
-            log("STEP HISTORY: BLE command pending; defer trigger=$trigger")
-            lateinit var retry: Runnable
-            retry = Runnable {
-                if (deferredHistoryRequest === retry) deferredHistoryRequest = null
-                if (connectedAddress != null && gatt === currentGatt) {
-                    requestStepHistory(trigger, force, isDeferredRetry = true)
-                }
-            }
-            deferredHistoryRequest = retry
-            handler.postDelayed(retry, Ft10cHistoryCoordinator.DEFER_RETRY_MS)
-            return
-        }
-        val characteristic = currentGatt.getService(FT10C_SERVICE_UUID)?.getCharacteristic(FT10C_TIME_WRITE_UUID)
-        if (characteristic == null || characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) {
-            log("STEP HISTORY: 0x33F1 unavailable"); return
-        }
-        val packet = byteArrayOf(0xB2.toByte(), 0xFA.toByte())
-        commandQueue.enqueue(
-            name = "HISTORY",
-            packet = packet,
-            onStarted = { pendingWriteKind = "HISTORY" },
-            onAccepted = {
-                cancelDeferredHistoryRequest()
-                historyCoordinator.onRequestAccepted(now)
-                handler.removeCallbacks(stepHistoryTimeout)
-                handler.postDelayed(stepHistoryTimeout, Ft10cHistoryCoordinator.DEFAULT_TIMEOUT_MS)
-                log("STEP HISTORY TX B2 FA accepted; trigger=$trigger")
-            },
-            onCompleted = { status, timedOut -> onQueuedCommandCompleted("HISTORY", status, timedOut) }
-        )
+    private fun requestStepHistory(trigger: String, force: Boolean = false) {
+        appCore.bleSessionRuntime.requestHistory(trigger, force)
     }
 
     private fun stepProfile(): StepProfile {
@@ -653,36 +501,7 @@ class MainActivity : ComponentActivity() {
 
 
     private fun sendUserProfileToBracelet(trigger: String) {
-        val currentGatt = gatt ?: return
-        if (connectedAddress == null || !hasBlePermissions()) return
-        if (activeDeviceProfile?.modelId != Ft10cDeviceProfile.modelId) {
-            log("PROFILE A9: blocked; active device has no verified FT-10C profile")
-            return
-        }
-        if (commandQueue.isBusy || pendingWriteKind != null || timeSyncState.writePending || historyCoordinator.isInFlight) {
-            log("PROFILE A9: GATT busy; retry in 2s (trigger=$trigger)")
-            handler.postDelayed({ if (connectedAddress != null && gatt === currentGatt) sendUserProfileToBracelet(trigger) }, 2_000)
-            return
-        }
-        val characteristic = currentGatt.getService(FT10C_SERVICE_UUID)?.getCharacteristic(FT10C_TIME_WRITE_UUID)
-        if (characteristic == null || characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) {
-            log("PROFILE A9: 0x33F1 WRITE unavailable")
-            return
-        }
-        val profile = stepProfile()
-        val packet = try { Ft10cProfileEncoder.encode(profile) } catch (e: Exception) {
-            log("PROFILE A9: invalid profile: ${e.message}")
-            return
-        }
-        commandQueue.enqueue(
-            name = "PROFILE",
-            packet = packet,
-            onStarted = { pendingWriteKind = "PROFILE" },
-            onAccepted = {
-                log("PROFILE A9 TX accepted by Android; trigger=$trigger; height=${profile.heightCm} weight=${profile.weightKg} age=${profile.ageYears} sex=${if (profile.isMale) "male" else "female"}; HEX=${packet.toHex()}")
-            },
-            onCompleted = { status, timedOut -> onQueuedCommandCompleted("PROFILE", status, timedOut) }
-        )
+        appCore.bleSessionRuntime.sendProfile(trigger)
     }
 
     private fun showStepProfileDialog() {
@@ -740,7 +559,7 @@ class MainActivity : ComponentActivity() {
         selected = devices[address]
         selectedAddress = address
         updateDeviceUiState { copy(canConnect = selected != null && connectedAddress == null) }
-        log("Выбрано: ${deviceListStateStore.nameFor(address) ?: "BLE device"} / $address")
+        log("Selected: ${deviceListStateStore.nameFor(address) ?: "BLE device"} / $address")
         refreshDeviceRows()
         publishDeviceComposeState()
     }
@@ -757,17 +576,17 @@ class MainActivity : ComponentActivity() {
 
     private fun startScan() {
         if (scanCoordinatorDelegate.isInitialized() && scanCoordinator.isScanning) {
-            log("Сканирование уже выполняется — повторный запуск пропущен")
+            log("Scan is already running; duplicate start request ignored")
             return
         }
         if (!hasBlePermissions()) {
-            log("Нет необходимых BLE-разрешений; запрашиваю разрешения")
+            log("Required BLE permissions are missing; requesting permissions")
             requestBlePermissions()
             return
         }
         val bt = adapter
-        if (bt == null) { log("BluetoothAdapter отсутствует"); return }
-        if (!bt.isEnabled) { log("Bluetooth выключен"); return }
+        if (bt == null) { log("BluetoothAdapter is unavailable"); return }
+        if (!bt.isEnabled) { log("Bluetooth is disabled"); return }
 
         // Scanning refreshes discovery results, not the independent active GATT session.
         // Keep the connected device visible even if it emits no advertising packets.
@@ -807,11 +626,11 @@ class MainActivity : ComponentActivity() {
         try {
             scanCoordinator.start()
         } catch (e: SecurityException) {
-            log("SecurityException при startScan: ${e.message}")
+            log("SecurityException during startScan: ${e.message}")
         } catch (e: IllegalStateException) {
-            log("IllegalStateException при startScan: ${e.message}")
+            log("IllegalStateException during startScan: ${e.message}")
         } catch (e: Exception) {
-            log("Ошибка startScan ${e.javaClass.simpleName}: ${e.message}")
+            log("startScan failed ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -824,24 +643,46 @@ class MainActivity : ComponentActivity() {
         if (!hasBlePermissions()) { requestBlePermissions(); return }
         val device = selected ?: return
         stopScan("подключение")
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            pendingNotificationConnectDevice = device
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+            return
+        }
+        if (bleService == null) {
+            pendingConnectDevice = device
+            log("Waiting for BLE foreground service to become ready before connecting")
+            return
+        }
+        beginGattConnection(device)
+    }
+
+    private fun beginGattConnection(device: BluetoothDevice) {
         try {
-            connectionCoordinator.connect(device, safeAddress(device) ?: "<unknown>")
+            // Foreground mode is entered before connectGatt so Android sees the
+            // connected-device work as user initiated and continuously visible.
+            bleService?.startBleForeground()
+                ?: throw IllegalStateException("BLE Foreground Service ещё не подключён")
+            appCore.bleSessionRuntime.connect(device, safeAddress(device) ?: "<unknown>")
         } catch (e: SecurityException) {
-            log("Нет разрешения на подключение: ${e.message}")
+            bleService?.stopBleForeground()
+            log("Missing permission for connection/foreground service: ${e.message}")
         } catch (e: Exception) {
-            log("Не удалось начать GATT-подключение: ${e.javaClass.simpleName}: ${e.message}")
+            bleService?.stopBleForeground()
+            log("Failed to start GATT connection: ${e.javaClass.simpleName}: ${e.message}")
             runOnUiThread { updateDeviceUiState { copy(syncStatus = "Ошибка запуска GATT-подключения") }; refreshDeviceRows() }
         }
     }
 
     private fun disconnectBracelet(reason: String) {
         stopScan("отключение браслета")
-        connectionCoordinator.disconnect(reason)
+        appCore.bleSessionRuntime.disconnect(reason)
+        bleService?.stopBleForeground()
         updateDeviceUiState { copy(connected = false, canConnect = selected != null, canSyncTime = false, canChooseDateTime = false, syncStatus = "Браслет отключён") }
         updateConnectionWarning()
         refreshDeviceRows()
         publishDeviceComposeState()
-        log("GATT закрыт: $reason")
+        log("GATT closed: $reason")
     }
 
     private fun updateConnectionWarning() {
@@ -871,7 +712,14 @@ class MainActivity : ComponentActivity() {
                 val granted = grantResults.getOrNull(i) == PackageManager.PERMISSION_GRANTED
                 log("Permission $permission = ${if (granted) "GRANTED" else "DENIED"}")
             }
-            if (hasBlePermissions()) log("Разрешения получены. Нажми «Найти браслет» ещё раз.")
+            if (hasBlePermissions()) log("Permissions granted. Tap \"Find Bracelet\" again.")
+        } else if (requestCode == 101) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            log("Permission ${Manifest.permission.POST_NOTIFICATIONS} = ${if (granted) "GRANTED" else "DENIED"}; BLE connection will proceed")
+            pendingNotificationConnectDevice?.also { device ->
+                pendingNotificationConnectDevice = null
+                if (bleService == null) pendingConnectDevice = device else beginGattConnection(device)
+            }
         }
     }
 
@@ -879,13 +727,22 @@ class MainActivity : ComponentActivity() {
         timeSyncState.automaticMode = automatic
         updateDeviceUiState { copy(automaticSync = automatic) }
         settingsRepository.automaticTimeSync = automatic
+        appCore.bleSessionRuntime.onTimeSyncSettingsChanged()
         val connected = connectedAddress != null
         updateDeviceUiState { copy(canChooseDateTime = connected && !automatic,
             canSyncTime = connected && !timeSyncState.writePending,
-            syncStatus = if (automatic) "Автоматическая синхронизация включится при следующем подключении"
+            syncStatus = if (automatic) "Синхронизация при подключении и далее периодически"
             else "Ручной режим. Выбери дату и время, затем нажми «Синхронизировать время»") }
         publishDeviceComposeState()
         log("TIME SYNC MODE: ${if (automatic) "AUTO" else "MANUAL"}")
+    }
+
+    private fun setTimeSyncInterval(intervalMinutes: Int) {
+        if (intervalMinutes !in SettingsRepository.TIME_SYNC_INTERVALS_MINUTES) return
+        settingsRepository.automaticTimeSyncIntervalMinutes = intervalMinutes
+        appCore.bleSessionRuntime.onTimeSyncSettingsChanged()
+        publishDeviceComposeState()
+        log("AUTO TIME SYNC: interval set to $intervalMinutes min")
     }
 
     private fun chooseManualDateTime() {
@@ -909,138 +766,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestBatteryA2(force: Boolean = false) {
-        val currentGatt = gatt ?: return
-        batteryCoordinator.request(
-            force = force,
-            isConnected = { connectedAddress != null && gatt === currentGatt && hasBlePermissions() },
-            isBusy = {
-                commandQueue.isBusy || timeSyncState.writePending ||
-                    historyCoordinator.isInFlight || pendingWriteKind != null
-            },
-            onFreshSkip = { log("BATTERY A2: skip; refreshed less than 30 minutes ago") },
-            onDeferred = { /* Retry is scheduled by the battery coordinator. */ },
-            onRetryExhausted = { log("BATTERY A2: retry budget exhausted; waiting for the next scheduled or manual refresh") },
-            onRequest = {
-                val characteristic = currentGatt.getService(FT10C_SERVICE_UUID)
-                    ?.getCharacteristic(FT10C_TIME_WRITE_UUID) ?: return@request
-                if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) return@request
-                commandQueue.enqueue(
-                    name = "BATTERY",
-                    packet = byteArrayOf(0xA2.toByte()),
-                    onStarted = { pendingWriteKind = "BATTERY" },
-                    onAccepted = {
-                        log("BATTERY A2 query: write accepted; refresh interval will start only after a valid A2 response")
-                    },
-                    onCompleted = { status, timedOut -> onQueuedCommandCompleted("BATTERY", status, timedOut) }
-                )
-            }
-        )
+        appCore.bleSessionRuntime.requestBattery(force)
     }
 
     private fun syncBraceletTime(automatic: Boolean = false) {
-        
-        if (automatic && timeSyncState.isAutomaticSyncAttempted()) {
-            log("AUTO TIME SYNC: попытка для этого подключения уже выполнялась")
-            return
-        }
-        val currentGatt = gatt
-        if (currentGatt == null || connectedAddress == null) {
-            log("TIME SYNC отменена: нет активного BLE-подключения")
-            return
-        }
-        if (!hasBlePermissions()) {
-            log("TIME SYNC отменена: отсутствует разрешение Bluetooth Connect")
-            requestBlePermissions()
-            return
-        }
-        if (timeSyncState.writePending) {
-            log("TIME SYNC: предыдущая запись ещё не завершилась")
-            return
-        }
-        if (commandQueue.isBusy || pendingWriteKind != null || historyCoordinator.isInFlight) {
-            log("TIME SYNC: GATT занят; повтор через 2 секунды")
-            handler.postDelayed({ if (connectedAddress != null && gatt === currentGatt) syncBraceletTime(automatic) }, 2_000)
-            return
-        }
-        if (activeDeviceProfile?.modelId != Ft10cDeviceProfile.modelId) {
-            log("TIME SYNC заблокирована: активный профиль FT-10C не подтверждён")
-            updateDeviceUiState { copy(syncStatus = "Синхронизация недоступна для неподдерживаемой модели") }
-            return
-        }
-        val characteristic = currentGatt.getService(FT10C_SERVICE_UUID)
-            ?.getCharacteristic(FT10C_TIME_WRITE_UUID)
-        if (characteristic == null) {
-            log("TIME SYNC: характеристика 0x33F1 в сервисе 0x55FF не найдена")
-            updateDeviceUiState { copy(syncStatus = "Не найдена характеристика 0x33F1") }
-            return
-        }
-        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) {
-            log("TIME SYNC: 0x33F1 не объявляет WRITE")
-            updateDeviceUiState { copy(syncStatus = "0x33F1 не поддерживает WRITE") }
-            return
-        }
-
-        val calendar = timeSyncState.calendarForSync(automatic)
-        val packet = Ft10cTimeSyncState.encodeOriginalTimePacket(calendar)
-        val localStamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.getDefault()).format(calendar.time)
-        log("TIME SYNC: ${if (automatic) "время телефона" else "ручная дата/время"}=$localStamp")
-        log("TIME SYNC: оригинальный пакет JetSport (${packet.size} байт)=${packet.toHex()}")
-
-        updateDeviceUiState { copy(canSyncTime = false) }
-        updateDeviceUiState { copy(syncStatus = "Отправка команды времени…") }
-        commandQueue.enqueue(
-            name = "TIME",
-            packet = packet,
-            onStarted = { pendingWriteKind = "TIME" },
-            onAccepted = {
-                timeSyncState.markWriteAccepted()
-                updateDeviceUiState { copy(syncStatus = "Запрос записи принят Android. Ожидание BLE callback…") }
-                publishDeviceComposeState()
-                log("TIME SYNC: writeCharacteristic принят Android; ожидаем onCharacteristicWrite (тайм-аут 5 секунд)")
-                if (automatic) log("AUTO TIME SYNC: запрос автоматически отправлен при подключении")
-            },
-            onCompleted = { status, timedOut -> onQueuedCommandCompleted("TIME", status, timedOut) }
-        )
+        appCore.bleSessionRuntime.syncTime(automatic)
     }
 
     private fun safeAddress(device: BluetoothDevice): String? = try { device.address } catch (_: SecurityException) { null }
     private fun safeDeviceName(device: BluetoothDevice): String? = try { device.name } catch (_: SecurityException) { null }
 
-    private fun gattStateName(state: Int): String = when (state) {
-        BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
-        BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
-        BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
-        BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
-        else -> "UNKNOWN"
-    }
-
-    private fun gattStatusName(status: Int): String = when (status) {
-        BluetoothGatt.GATT_SUCCESS -> "GATT_SUCCESS"
-        8 -> "GATT_CONN_TIMEOUT"
-        19 -> "GATT_CONN_TERMINATE_PEER_USER"
-        22 -> "GATT_CONN_TERMINATE_LOCAL_HOST"
-        133 -> "GATT_ERROR (133)"
-        else -> "status=$status"
-    }
-
-    private fun properties(value: Int): String = buildList {
-        if (value and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("READ")
-        if (value and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("WRITE")
-        if (value and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) add("WRITE_NO_RESPONSE")
-        if (value and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("NOTIFY")
-        if (value and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("INDICATE")
-    }.joinToString("|")
-
-    companion object {
-        private val FT10C_SERVICE_UUID: UUID = Ft10cDeviceProfile.serviceUuid
-        private val FT10C_TIME_WRITE_UUID: UUID = Ft10cDeviceProfile.writeCharacteristicUuid
-    }
-
     private fun log(message: String) {
         runOnUiThread {
-            val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-            val line = "[$stamp] $message\n"
-            technicalLogStore.append(line)
+            // AppCore owns the single journal for both Activity and background BLE events.
+            appCore.appendTechnicalLog(message)
             publishDeviceComposeState()
         }
     }
@@ -1067,7 +806,7 @@ class MainActivity : ComponentActivity() {
     private fun exportTechnicalLog() {
         val snapshot = technicalLogStore.snapshot()
         if (snapshot.isBlank()) {
-            log(if (appLanguage == "ru") "Экспорт журнала: пока нет записей" else "Log export: no entries yet")
+            log("Log export: no entries yet")
             return
         }
         pendingExportLogContent = snapshot
@@ -1114,13 +853,13 @@ class MainActivity : ComponentActivity() {
         if (enabled) {
             onBluetoothAdapterAvailabilityChanged(true)
         } else {
-            handleBleUnavailable("Bluetooth выключен")
+            handleBleUnavailable("Bluetooth is disabled")
         }
     }
 
     private fun onBluetoothAdapterAvailabilityChanged(enabled: Boolean) {
         if (!enabled) {
-            handleBleUnavailable("Bluetooth выключен")
+            handleBleUnavailable("Bluetooth is disabled")
             return
         }
         if (!hasBlePermissions()) {
@@ -1130,7 +869,7 @@ class MainActivity : ComponentActivity() {
         val previousReason = bluetoothUnavailableReason
         bluetoothUnavailableReason = null
         if (previousReason != null) {
-            log("Bluetooth включён; автоматическое переподключение не выполняется")
+            log("Bluetooth enabled; automatic reconnection is not performed")
             updateDeviceUiState {
                 copy(
                     connected = false,
@@ -1150,16 +889,10 @@ class MainActivity : ComponentActivity() {
         if (bluetoothUnavailableReason == reason) return
         bluetoothUnavailableReason = reason
         stopScan(reason)
-        runCatching { connectionCoordinator.disconnect(reason) }
+        runCatching { appCore.bleSessionRuntime.disconnect(reason) }
+            .onSuccess { bleService?.stopBleForeground() }
             .onFailure { log("BLE cleanup after availability loss failed: ${it.javaClass.simpleName}: ${it.message}") }
         cancelDeferredHistoryRequest()
-        handler.removeCallbacks(stepHistoryTimeout)
-        historyCoordinator.onDisconnected()
-        syncCoordinator.onDisconnected()
-        batteryCoordinator.onDisconnected()
-        timeSyncState.onDisconnected()
-        pendingWriteKind = null
-        activeDeviceProfile = null
         dashboardController.onDisconnected()
         updateDeviceUiState {
             copy(
@@ -1167,7 +900,7 @@ class MainActivity : ComponentActivity() {
                 canConnect = false,
                 canSyncTime = false,
                 canChooseDateTime = false,
-                syncStatus = if (appLanguage == "ru") reason else if (reason == "Bluetooth выключен") "Bluetooth is turned off" else "Bluetooth permissions are required"
+                syncStatus = if (appLanguage == "ru") reason else if (reason == "Bluetooth is disabled") "Bluetooth is turned off" else "Bluetooth permissions are required"
             )
         }
         updateConnectionWarning()
@@ -1190,6 +923,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (::appCore.isInitialized) phoneFinderAlertActive = appCore.phoneFinderAlert.isActive
         validateBleAvailabilityOnResume()
         // Re-evaluate the calendar day on every foreground return. This is a local
         // database refresh; it does not itself issue an additional BLE command.
@@ -1197,7 +931,7 @@ class MainActivity : ComponentActivity() {
         // Refresh only while the UI is foregrounded; no alarm, wake lock or background polling.
         if (bluetoothUnavailableReason == null) {
             syncCoordinator.scheduleForegroundRefresh(
-                isConnected = { connectedAddress != null && gatt != null },
+                isConnected = { appCore.bleSessionRuntime.isConnected },
                 onHistory = { requestStepHistory("app foreground", force = false) },
                 onBattery = { requestBatteryA2(force = false) }
             )
@@ -1207,26 +941,18 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // GATT callbacks are Activity-bound in this generation. If Android recreates
-        // the Activity for an unhandled configuration change, close that session too
-        // rather than leaving callbacks attached to the destroyed Activity. AppCore
-        // itself is retained by AppCoreViewModel across configuration changes.
         if (isFinishing || isChangingConfigurations) {
             stopScan(if (isFinishing) "закрытие приложения" else "пересоздание Activity")
-            cancelDeferredHistoryRequest()
-            handler.removeCallbacks(stepHistoryTimeout)
-            connectionCoordinator.cancelPendingWorkflow()
-            if (commandQueueDelegate.isInitialized()) {
-                commandQueue.cancelAll(if (isFinishing) "application finishing" else "Activity recreation")
-            }
-            syncCoordinator.onDisconnected()
-            batteryCoordinator.onDisconnected()
-            historyCoordinator.onDisconnected()
-            timeSyncState.onDisconnected()
-            deviceManager.disconnectAndClose()
         }
-        // AppCoreViewModel.onCleared() closes application-scoped resources exactly
-        // once when the Activity is permanently removed, not during configuration changes.
+        // A connected foreground service outlives the Activity/task. When no GATT
+        // session remains, stop the started service; its onDestroy closes AppCore.
+        if (isFinishing && ::appCore.isInitialized && !appCore.bleSessionRuntime.hasGatt) {
+            stopService(Intent(this, Ft10cBleForegroundService::class.java))
+        }
+        if (serviceBound) {
+            runCatching { unbindService(bleServiceConnection) }
+            serviceBound = false
+        }
         super.onDestroy()
     }
 

@@ -3,34 +3,30 @@ package com.jetsport.ft10csync.ble
 import android.bluetooth.BluetoothDevice
 import android.os.Handler
 
+/** Transport operations required by the connection workflow. Implementations own GATT. */
+interface Ft10cConnectionTransport {
+    fun connect(device: BluetoothDevice)
+    fun failAndClose(address: String, reason: String)
+    fun disconnectAndClose()
+}
+
 /**
- * Owns the application-level connect/disconnect workflow around Ft10cDeviceManager.
- *
- * The coordinator handles the pending connection target, connection timeout,
- * and service-discovery deadline, and invokes narrowly-scoped hooks for app-specific
- * cleanup/UI reactions. GATT operations, service-layout inspection, protocol commands
- * and sync scheduling remain in their existing components.
+ * Owns connection deadlines and pending target state without depending on the concrete
+ * GATT controller or an Activity. UI-facing timeout results are published as immutable
+ * events; listener hooks are reserved for application/session cleanup only.
  */
-class Ft10cConnectionCoordinator(
+internal class Ft10cConnectionCoordinator(
     private val handler: Handler,
-    private val deviceManager: Ft10cDeviceManager,
+    private val transport: Ft10cConnectionTransport,
     private val isConnected: (String) -> Boolean,
     private val logger: (String) -> Unit,
+    private val events: BleUiEventDispatcher,
     private val listener: Listener,
     private val timeoutMs: Long = DEFAULT_CONNECT_TIMEOUT_MS
 ) {
     interface Listener {
         /** Cancel work belonging to the previous connection before starting a new one. */
         fun onBeforeConnect()
-
-        /** App/UI reaction when the GATT connection did not arrive before the timeout. */
-        fun onConnectTimeout(address: String)
-
-        /** GATT connected, but Android did not complete service discovery in time. */
-        fun onServiceDiscoveryTimeout(address: String)
-
-        /** Android completed service discovery with a failure status. */
-        fun onServiceDiscoveryFailed(address: String, status: Int)
 
         /** Cancel app-level work before an explicit user disconnect. */
         fun onBeforeDisconnect(reason: String)
@@ -47,37 +43,37 @@ class Ft10cConnectionCoordinator(
         val address = pendingAddress ?: return@Runnable
         if (!isConnected(address)) {
             pendingAddress = null
-            logger("GATT CONNECT TIMEOUT: нет callback подключения за ${timeoutMs / 1000} секунд; target=$address. Закрываю незавершённую сессию")
-            deviceManager.failAndClose(address, "GATT connect timeout")
-            listener.onConnectTimeout(address)
+            logger("GATT CONNECT TIMEOUT: no connection callback within ${timeoutMs / 1000} seconds; target=$address. Closing incomplete session")
+            transport.failAndClose(address, "GATT connect timeout")
+            events.dispatch(BleUiEvent.GattConnectTimedOut(address))
         }
     }
 
     private val discoveryTimeoutTask = Runnable {
         val address = discoveryAddress ?: return@Runnable
         discoveryAddress = null
-        logger("GATT SERVICE DISCOVERY TIMEOUT: нет callback services-discovered за ${SERVICE_DISCOVERY_TIMEOUT_MS / 1000} секунд; target=$address. Закрываю незавершённую сессию")
-        deviceManager.failAndClose(address, "GATT service discovery timeout")
-        listener.onServiceDiscoveryTimeout(address)
+        logger("GATT SERVICE DISCOVERY TIMEOUT: no services-discovered callback within ${SERVICE_DISCOVERY_TIMEOUT_MS / 1000} seconds; target=$address. Closing incomplete session")
+        transport.failAndClose(address, "GATT service discovery timeout")
+        events.dispatch(BleUiEvent.GattServiceDiscoveryTimedOut(address))
     }
 
     @Synchronized
     fun connect(device: BluetoothDevice, address: String) {
         listener.onBeforeConnect()
         pendingAddress = address
-        logger("Подключение к $address…")
+        logger("Connecting to $address…")
         try {
             handler.removeCallbacks(connectTimeoutTask)
             handler.removeCallbacks(discoveryTimeoutTask)
             discoveryAddress = null
             handler.postDelayed(connectTimeoutTask, timeoutMs)
-            deviceManager.connect(device)
+            transport.connect(device)
         } catch (error: Exception) {
             pendingAddress = null
             handler.removeCallbacks(connectTimeoutTask)
             handler.removeCallbacks(discoveryTimeoutTask)
             discoveryAddress = null
-            deviceManager.failAndClose(
+            transport.failAndClose(
                 address,
                 if (error is SecurityException) "permission denied" else "connect start failed"
             )
@@ -106,8 +102,8 @@ class Ft10cConnectionCoordinator(
         handler.removeCallbacks(discoveryTimeoutTask)
         if (status != android.bluetooth.BluetoothGatt.GATT_SUCCESS && address != null) {
             logger("GATT SERVICE DISCOVERY FAILED: status=$status; target=$address. Closing session")
-            deviceManager.failAndClose(address, "GATT service discovery failed: status=$status")
-            listener.onServiceDiscoveryFailed(address, status)
+            transport.failAndClose(address, "GATT service discovery failed: status=$status")
+            events.dispatch(BleUiEvent.GattServiceDiscoveryFailed(address, status))
         }
     }
 
@@ -127,10 +123,10 @@ class Ft10cConnectionCoordinator(
         discoveryAddress = null
         handler.removeCallbacks(connectTimeoutTask)
         handler.removeCallbacks(discoveryTimeoutTask)
-        deviceManager.disconnectAndClose()
+        transport.disconnectAndClose()
     }
 
-    /** Removes only coordinator-owned callbacks; GATT ownership stays with the caller. */
+    /** Removes only coordinator-owned callbacks; transport ownership stays with its runtime. */
     @Synchronized
     fun cancelPendingWorkflow() {
         pendingAddress = null
